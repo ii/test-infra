@@ -31,13 +31,12 @@ deck:
     testgrid_root: https://testgrid.k8s.io/
     viewers:
       "started.json|finished.json":
+      - "apisnoop"
       - "metadata"
       "build-log.txt":
       - "buildlog"
       "artifacts/junit.*\\.xml":
       - "junit"
-      "apisnoop.json":
-      - "apisnoop"
 
     announcement: "The old job viewer, Gubernator, has been deprecated in favour of this page, Spyglass.{{if .ArtifactPath}} For now, the old page is <a href='https://gubernator.k8s.io/build/{{.ArtifactPath}}'>still available</a>.{{end}} Please send feedback to sig-testing."
   tide_update_period: 1s

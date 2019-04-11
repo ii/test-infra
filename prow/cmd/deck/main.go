@@ -66,6 +66,7 @@ import (
 	_ "k8s.io/test-infra/prow/spyglass/lenses/buildlog"
 	_ "k8s.io/test-infra/prow/spyglass/lenses/junit"
 	_ "k8s.io/test-infra/prow/spyglass/lenses/metadata"
+	_ "k8s.io/test-infra/prow/spyglass/lenses/apisnoop"
 )
 
 type options struct {
