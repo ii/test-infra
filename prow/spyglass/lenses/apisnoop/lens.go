@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package metadata provides a metadata viewer for Spyglass
-package metadata
+package apisnoop
 
 import (
 	"bytes"
@@ -33,8 +33,8 @@ import (
 )
 
 const (
-	name     = "metadata"
-	title    = "Metadata"
+	name     = "apisnoop"
+	title    = "APISnoop"
 	priority = 0
 )
 
@@ -76,14 +76,14 @@ func (lens Lens) Callback(artifacts []lenses.Artifact, resourceDir string, data 
 // Body creates a view for prow job metadata.
 func (lens Lens) Body(artifacts []lenses.Artifact, resourceDir string, data string) string {
 	var buf bytes.Buffer
-	type MetadataViewData struct {
+	type APISnoopViewData struct {
 		Status       string
 		StartTime    time.Time
 		FinishedTime time.Time
 		Elapsed      time.Duration
 		Metadata     map[string]string
 	}
-	metadataViewData := MetadataViewData{Status: "Pending"}
+	apisnoopViewData := APISnoopViewData{Status: "Pending"}
 	started := gcs.Started{}
 	finished := gcs.Finished{}
 	for _, a := range artifacts {
@@ -95,35 +95,35 @@ func (lens Lens) Body(artifacts []lenses.Artifact, resourceDir string, data stri
 			if err = json.Unmarshal(read, &started); err != nil {
 				logrus.WithError(err).Error("Error unmarshaling started.json")
 			}
-			metadataViewData.StartTime = time.Unix(started.Timestamp, 0)
+			apisnoopViewData.StartTime = time.Unix(started.Timestamp, 0)
 		} else if a.JobPath() == "finished.json" {
 			if err = json.Unmarshal(read, &finished); err != nil {
 				logrus.WithError(err).Error("Error unmarshaling finished.json")
 			}
 			if finished.Timestamp != nil {
-				metadataViewData.FinishedTime = time.Unix(*finished.Timestamp, 0)
+				apisnoopViewData.FinishedTime = time.Unix(*finished.Timestamp, 0)
 			}
-			metadataViewData.Status = finished.Result
+			apisnoopViewData.Status = finished.Result
 		}
 	}
 
-	if !metadataViewData.StartTime.IsZero() {
-		if metadataViewData.FinishedTime.IsZero() {
-			metadataViewData.Elapsed = time.Now().Sub(metadataViewData.StartTime)
+	if !apisnoopViewData.StartTime.IsZero() {
+		if apisnoopViewData.FinishedTime.IsZero() {
+			apisnoopViewData.Elapsed = time.Now().Sub(apisnoopViewData.StartTime)
 		} else {
-			metadataViewData.Elapsed =
-				metadataViewData.FinishedTime.Sub(metadataViewData.StartTime)
+			apisnoopViewData.Elapsed =
+				apisnoopViewData.FinishedTime.Sub(apisnoopViewData.StartTime)
 		}
-		metadataViewData.Elapsed = metadataViewData.Elapsed.Round(time.Second)
+		apisnoopViewData.Elapsed = apisnoopViewData.Elapsed.Round(time.Second)
 	}
 
-	metadataViewData.Metadata = map[string]string{"node": started.Node}
+	apisnoopViewData.Metadata = map[string]string{"node": started.Node}
 
 	metadatas := []metadata.Metadata{started.Metadata, finished.Metadata}
 	for _, m := range metadatas {
 		for k, v := range m {
 			if s, ok := v.(string); ok && v != "" {
-				metadataViewData.Metadata[k] = s
+				apisnoopViewData.Metadata[k] = s
 			}
 		}
 	}
@@ -133,7 +133,7 @@ func (lens Lens) Body(artifacts []lenses.Artifact, resourceDir string, data stri
 		return fmt.Sprintf("Failed to load template: %v", err)
 	}
 
-	if err := metadataTemplate.ExecuteTemplate(&buf, "body", metadataViewData); err != nil {
+	if err := metadataTemplate.ExecuteTemplate(&buf, "body", apisnoopViewData); err != nil {
 		logrus.WithError(err).Error("Error executing template.")
 	}
 	return buf.String()
