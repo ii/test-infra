@@ -213,6 +213,7 @@ type PullRequestEvent struct {
 
 // PullRequest contains information about a PullRequest.
 type PullRequest struct {
+	ID                 int               `json:"id"`
 	Number             int               `json:"number"`
 	HTMLURL            string            `json:"html_url"`
 	User               User              `json:"user"`
