@@ -84,9 +84,13 @@ func (lens Lens) Body(artifacts []lenses.Artifact, resourceDir string, data stri
 		Metadata     map[string]string
 	}
 	apisnoopViewData := APISnoopViewData{Status: "Pending"}
+	// apsnoop.cncf.io/stable/index.html BODY | <script> | script1 script2 <TEMPLATE>
 	started := gcs.Started{}
 	finished := gcs.Finished{}
 	for _, a := range artifacts {
+		// apisnoop.json.version = SWITCH:
+		// get X.script1.chunk
+
 		read, err := a.ReadAll()
 		if err != nil {
 			logrus.WithError(err).Error("Failed reading from artifact.")
