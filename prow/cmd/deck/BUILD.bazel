@@ -114,6 +114,7 @@ go_library(
         "//prow/spyglass/lenses/buildlog:go_default_library",
         "//prow/spyglass/lenses/junit:go_default_library",
         "//prow/spyglass/lenses/metadata:go_default_library",
+        "//prow/spyglass/lenses/apisnoop:go_default_library",
         "//prow/tide:go_default_library",
         "//prow/tide/history:go_default_library",
         "//vendor/cloud.google.com/go/storage:go_default_library",

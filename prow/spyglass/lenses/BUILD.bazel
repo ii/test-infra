@@ -9,6 +9,7 @@ filegroup(
         "//prow/spyglass/lenses/buildlog:template",
         "//prow/spyglass/lenses/junit:template",
         "//prow/spyglass/lenses/metadata:template",
+        "//prow/spyglass/lenses/apisnoop:template",
     ],
 )
 
@@ -18,6 +19,7 @@ filegroup(
         "//prow/spyglass/lenses/buildlog:resources",
         "//prow/spyglass/lenses/junit:resources",
         "//prow/spyglass/lenses/metadata:resources",
+        "//prow/spyglass/lenses/apisnoop:resources",
     ],
 )
 
@@ -48,6 +50,7 @@ filegroup(
         "//prow/spyglass/lenses/buildlog:all-srcs",
         "//prow/spyglass/lenses/junit:all-srcs",
         "//prow/spyglass/lenses/metadata:all-srcs",
+        "//prow/spyglass/lenses/apisnoop:all-srcs",
     ],
     tags = ["automanaged"],
     visibility = ["//visibility:public"],

@@ -66,6 +66,7 @@ type Configuration struct {
 	Lgtm                       []Lgtm                 `json:"lgtm,omitempty"`
 	RepoMilestone              map[string]Milestone   `json:"repo_milestone,omitempty"`
 	Project                    ProjectConfig          `json:"project_config,omitempty"`
+	ProjectManager             ProjectManager         `json:"project_manager,omitempty"`
 	RequireMatchingLabel       []RequireMatchingLabel `json:"require_matching_label,omitempty"`
 	RequireSIG                 RequireSIG             `json:"requiresig,omitempty"`
 	Slack                      Slack                  `json:"slack,omitempty"`
@@ -435,6 +436,34 @@ type ProjectRepoConfig struct {
 	// A map of project name to default column; an issue/PR will be added
 	// to the default column if column name is not provided in the command
 	ProjectColumnMap map[string]string `json:"repo_default_column_map,omitempty"`
+}
+
+// ProjectManager represents the config for the ProjectManager plugin, holding top
+// level config options and a list of Projects
+type ProjectManager struct {
+	OrgRepos map[string]ManagedOrgRepo `json:"org/repos,omitempty"`
+}
+
+// ManagedOrgRepo is used by the ProjectManager plugin to represent an Organisation
+// or Repository with a list of Projects
+type ManagedOrgRepo struct {
+	Projects map[string]ManagedProject `json:"projects,omitempty"`
+}
+
+// ManagedProject is used by the ProjectManager plugin to represent a Project
+// with a list of Columns
+type ManagedProject struct {
+	Columns []ManagedColumn `json:"columns,omitempty"`
+}
+
+// ManagedColumn is used by the ProjectQueries plugin to represent a project column
+// and the conditions to add a PR to that column
+type ManagedColumn struct {
+	ID     int      `json:"id,omitempty"`
+	Name   string   `json:"name,omitempty"`
+	State  string   `json:"state,omitempty"`
+	Labels []string `json:"labels,omitempty"`
+	Org    string   `json:"org,omitempty"`
 }
 
 // MergeWarning is a config for the slackevents plugin's manual merge warnings.
