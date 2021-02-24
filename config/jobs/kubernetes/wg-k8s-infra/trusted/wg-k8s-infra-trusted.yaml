@@ -56,6 +56,13 @@ periodics:
         echo "Running Audit Script to dump GCP configuration to yaml" >&2
         pushd ./audit
         bash ./audit-gcp.sh
+        # checkout master audit-gcp.sh
+        # so don't contaminate the PR
+        # stash, checkout master, apply stash, revert audit-gcp.sh
+        git stash
+        git checkout 783b9c2 ../
+        git stash apply
+        git checkout 783b9c2 ./audit-gcp.sh
         popd
 
         echo "Generate pr-creator binary from k/test-infra/robots" >&2
