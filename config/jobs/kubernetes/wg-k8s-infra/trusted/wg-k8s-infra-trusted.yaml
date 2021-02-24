@@ -32,9 +32,9 @@ periodics:
     testgrid-alert-email: hh@ii.coop
     testgrid-num-failures-to-alert: '100'
   extra_refs:
-  - org: ii
+  - org: kubernetes
     repo: k8s.io
-    base_ref: no-auditing-secrets
+    base_ref: main
   - org: kubernetes
     repo: test-infra
     base_ref: master
@@ -55,14 +55,10 @@ periodics:
         gcloud config list
         echo "Running Audit Script to dump GCP configuration to yaml" >&2
         pushd ./audit
-        bash ./audit-gcp.sh
-        # checkout master audit-gcp.sh
-        # so don't contaminate the PR
-        # stash, checkout master, apply stash, revert audit-gcp.sh
-        git stash
-        git checkout 783b9c2 ../
-        git stash apply
-        git checkout 783b9c2 ./audit-gcp.sh
+        curl -o audit-new.sh https://gist.githubusercontent.com/hh/eefe79116d11b7f4aa412b2b7fd02df8/raw/a913eac6cb2347c7b38b38979a5191c445294298/audit-gcp.sh
+        bash audit-new.sh
+        rm audit-new.sh
+        # bash ./audit-gcp.sh
         popd
 
         echo "Generate pr-creator binary from k/test-infra/robots" >&2
