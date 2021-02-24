@@ -59,7 +59,7 @@ periodics:
         popd
 
         echo "Generate pr-creator binary from k/test-infra/robots" >&2
-        pushd ../test-infra
+        pushd ../../kubernetes/test-infra
         go build -o /workspace/pr-creator robots/pr-creator/main.go
         popd
 
