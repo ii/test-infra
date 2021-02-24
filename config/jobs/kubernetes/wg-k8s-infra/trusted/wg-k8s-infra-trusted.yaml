@@ -63,7 +63,7 @@ periodics:
         go build -o /workspace/pr-creator robots/pr-creator/main.go
         popd
 
-        echo "Prepare commit for possible PR via $GH_USER" >&2
+        echo "Prepare commit for possible PR" >&2
         GH_TOKEN=$(cat /etc/github-token/token)
         GH_USER=cncf-ci
         GH_NAME="CNCF CI Bot"
@@ -92,10 +92,26 @@ periodics:
       - name: github
         mountPath: /etc/github-token
         readOnly: true
+      - name: gcloud
+        mountPath: /root/.config/gcloud
+        readOnly: false
     volumes:
     - name: github
-      secret:
-        secretName: cncf-ci-github-token
+      hostPath:
+        path: /mnt/disks/kind-node/github
+        type: Directory
+    - name: gcloud
+      hostPath:
+        path: /mnt/disks/kind-node/gcloud
+        type: Directory
+    #   volumeMounts:
+    #   - name: github
+    #     mountPath: /etc/github-token
+    #     readOnly: true
+    # volumes:
+    # - name: github
+    #   secret:
+    #     secretName: cncf-ci-github-token
 
 postsubmits:
   kubernetes/k8s.io:
