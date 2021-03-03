@@ -55,10 +55,7 @@ periodics:
         gcloud config list
         echo "Running Audit Script to dump GCP configuration to yaml" >&2
         pushd ./audit
-        curl -o audit-new.sh https://gist.githubusercontent.com/hh/eefe79116d11b7f4aa412b2b7fd02df8/raw/a913eac6cb2347c7b38b38979a5191c445294298/audit-gcp.sh
-        bash audit-new.sh
-        rm audit-new.sh
-        # bash ./audit-gcp.sh
+        bash ./audit-gcp.sh
         popd
 
         echo "Generate pr-creator binary from k/test-infra/robots" >&2
@@ -93,26 +90,10 @@ periodics:
       - name: github
         mountPath: /etc/github-token
         readOnly: true
-      - name: gcloud
-        mountPath: /root/.config/gcloud
-        readOnly: false
     volumes:
     - name: github
-      hostPath:
-        path: /mnt/disks/kind-node/github
-        type: Directory
-    - name: gcloud
-      hostPath:
-        path: /mnt/disks/kind-node/gcloud
-        type: Directory
-    #   volumeMounts:
-    #   - name: github
-    #     mountPath: /etc/github-token
-    #     readOnly: true
-    # volumes:
-    # - name: github
-    #   secret:
-    #     secretName: cncf-ci-github-token
+      secret:
+        secretName: cncf-ci-github-token
 
 postsubmits:
   kubernetes/k8s.io:
