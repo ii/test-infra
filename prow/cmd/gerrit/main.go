@@ -31,8 +31,8 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"k8s.io/test-infra/pkg/flagutil"
-	"k8s.io/test-infra/prow/config"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
+	configflagutil "k8s.io/test-infra/prow/flagutil/config"
 	"k8s.io/test-infra/prow/gerrit/adapter"
 	"k8s.io/test-infra/prow/gerrit/client"
 	"k8s.io/test-infra/prow/interrupts"
@@ -42,29 +42,33 @@ import (
 )
 
 type options struct {
-	cookiefilePath string
-	configPath     string
-	jobConfigPath  string
-	projects       client.ProjectsFlag
+	cookiefilePath    string
+	tokenPathOverride string
+	config            configflagutil.ConfigOptions
+	projects          client.ProjectsFlag
 	// lastSyncFallback is the path to sync the latest timestamp
 	// Can be /local/path, gs://path/to/object or s3://path/to/object.
-	lastSyncFallback string
-	dryRun           bool
-	kubernetes       prowflagutil.KubernetesOptions
-	storage          prowflagutil.StorageClientOptions
+	lastSyncFallback       string
+	dryRun                 bool
+	kubernetes             prowflagutil.KubernetesOptions
+	storage                prowflagutil.StorageClientOptions
+	instrumentationOptions prowflagutil.InstrumentationOptions
 }
 
-func (o *options) Validate() error {
+func (o *options) validate() error {
 	if len(o.projects) == 0 {
 		return errors.New("--gerrit-projects must be set")
 	}
 
-	if o.cookiefilePath == "" {
+	if o.cookiefilePath != "" && o.tokenPathOverride != "" {
+		return fmt.Errorf("only one of --cookiefile=%q --token-path=%q allowed, not both", o.cookiefilePath, o.tokenPathOverride)
+	}
+	if o.cookiefilePath == "" && o.tokenPathOverride == "" {
 		logrus.Info("--cookiefile is not set, using anonymous authentication")
 	}
 
-	if o.configPath == "" {
-		return errors.New("--config-path must be set")
+	if err := o.config.Validate(o.dryRun); err != nil {
+		return err
 	}
 
 	if o.lastSyncFallback == "" {
@@ -72,10 +76,10 @@ func (o *options) Validate() error {
 	}
 
 	if strings.HasPrefix(o.lastSyncFallback, "gs://") && !o.storage.HasGCSCredentials() {
-		logrus.WithField("last-sync-fallback", o.lastSyncFallback).Warn("--gcs-credentials-file unset, will try and access with a default service account")
+		logrus.WithField("last-sync-fallback", o.lastSyncFallback).Info("--gcs-credentials-file unset, will try and access with a default service account")
 	}
 	if strings.HasPrefix(o.lastSyncFallback, "s3://") && !o.storage.HasS3Credentials() {
-		logrus.WithField("last-sync-fallback", o.lastSyncFallback).Warn("--s3-credentials-file unset, will try and access with auto-discovered credentials")
+		logrus.WithField("last-sync-fallback", o.lastSyncFallback).Info("--s3-credentials-file unset, will try and access with auto-discovered credentials")
 	}
 	return nil
 }
@@ -83,13 +87,12 @@ func (o *options) Validate() error {
 func gatherOptions(fs *flag.FlagSet, args ...string) options {
 	var o options
 	o.projects = client.ProjectsFlag{}
-	fs.StringVar(&o.configPath, "config-path", "", "Path to config.yaml.")
-	fs.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs")
 	fs.StringVar(&o.cookiefilePath, "cookiefile", "", "Path to git http.cookiefile, leave empty for anonymous")
 	fs.Var(&o.projects, "gerrit-projects", "Set of gerrit repos to monitor on a host example: --gerrit-host=https://android.googlesource.com=platform/build,toolchain/llvm, repeat fs for each host")
 	fs.StringVar(&o.lastSyncFallback, "last-sync-fallback", "", "The /local/path, gs://path/to/object or s3://path/to/object to sync the latest timestamp")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "Run in dry-run mode, performing no modifying actions.")
-	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.storage} {
+	fs.StringVar(&o.tokenPathOverride, "token-path", "", "Force the use of the token in this path, use with gcloud auth print-access-token")
+	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.storage, &o.instrumentationOptions, &o.config} {
 		group.AddFlags(fs)
 	}
 	fs.Parse(args)
@@ -229,17 +232,15 @@ func (st *syncTime) Update(newState client.LastSyncState) error {
 func main() {
 	logrusutil.ComponentInit()
 
-	defer interrupts.WaitForGracefulShutdown()
-
-	pjutil.ServePProf()
-
 	o := gatherOptions(flag.NewFlagSet(os.Args[0], flag.ExitOnError), os.Args[1:]...)
-	if err := o.Validate(); err != nil {
+	if err := o.validate(); err != nil {
 		logrus.Fatalf("Invalid options: %v", err)
 	}
 
-	ca := &config.Agent{}
-	if err := ca.Start(o.configPath, o.jobConfigPath); err != nil {
+	pjutil.ServePProf(o.instrumentationOptions.PProfPort)
+
+	ca, err := o.config.ConfigAgent()
+	if err != nil {
 		logrus.WithError(err).Fatal("Error starting config agent.")
 	}
 	cfg := ca.Config
@@ -262,13 +263,17 @@ func main() {
 	if err := st.init(o.projects); err != nil {
 		logrus.WithError(err).Fatal("Error initializing lastSyncFallback.")
 	}
-	c, err := adapter.NewController(&st, o.cookiefilePath, o.projects, prowJobClient, cfg)
+	gerritClient, err := client.NewClient(o.projects)
 	if err != nil {
 		logrus.WithError(err).Fatal("Error creating gerrit client.")
 	}
+	gerritClient.Authenticate(o.cookiefilePath, o.tokenPathOverride)
+
+	c := adapter.NewController(&st, gerritClient, prowJobClient, cfg)
 
 	logrus.Infof("Starting gerrit fetcher")
 
+	defer interrupts.WaitForGracefulShutdown()
 	interrupts.Tick(func() {
 		start := time.Now()
 		if err := c.Sync(); err != nil {

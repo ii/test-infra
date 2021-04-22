@@ -26,15 +26,15 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"k8s.io/test-infra/prow/interrupts"
-
 	"k8s.io/test-infra/pkg/flagutil"
 	"k8s.io/test-infra/prow/config/secret"
 	"k8s.io/test-infra/prow/external-plugins/needs-rebase/plugin"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
 	"k8s.io/test-infra/prow/github"
+	"k8s.io/test-infra/prow/interrupts"
 	"k8s.io/test-infra/prow/labels"
-
+	"k8s.io/test-infra/prow/logrusutil"
+	"k8s.io/test-infra/prow/pjutil"
 	"k8s.io/test-infra/prow/pluginhelp/externalplugins"
 	"k8s.io/test-infra/prow/plugins"
 )
@@ -42,9 +42,12 @@ import (
 type options struct {
 	port int
 
-	pluginConfig string
-	dryRun       bool
-	github       prowflagutil.GitHubOptions
+	pluginConfig           string
+	dryRun                 bool
+	github                 prowflagutil.GitHubOptions
+	instrumentationOptions prowflagutil.InstrumentationOptions
+	logLevel               string
+	hourlyTokens           int
 
 	updatePeriod time.Duration
 
@@ -69,8 +72,10 @@ func gatherOptions() options {
 	fs.BoolVar(&o.dryRun, "dry-run", true, "Dry run for testing. Uses API tokens but does not mutate.")
 	fs.DurationVar(&o.updatePeriod, "update-period", time.Hour*24, "Period duration for periodic scans of all PRs.")
 	fs.StringVar(&o.webhookSecretFile, "hmac-secret-file", "/etc/webhook/hmac", "Path to the file containing the GitHub HMAC secret.")
+	fs.StringVar(&o.logLevel, "log-level", "debug", fmt.Sprintf("Log level is one of %v.", logrus.AllLevels))
+	fs.IntVar(&o.hourlyTokens, "hourly-tokens", 360, "The number of hourly tokens need-rebase may use")
 
-	for _, group := range []flagutil.OptionGroup{&o.github} {
+	for _, group := range []flagutil.OptionGroup{&o.github, &o.instrumentationOptions} {
 		group.AddFlags(fs)
 	}
 	fs.Parse(os.Args[1:])
@@ -78,18 +83,25 @@ func gatherOptions() options {
 }
 
 func main() {
+	logrusutil.ComponentInit()
 	o := gatherOptions()
 	if err := o.Validate(); err != nil {
 		logrus.Fatalf("Invalid options: %v", err)
 	}
 
-	logrus.SetFormatter(&logrus.JSONFormatter{})
-	// TODO: Use global option from the prow config.
-	logrus.SetLevel(logrus.InfoLevel)
+	logLevel, err := logrus.ParseLevel(o.logLevel)
+	if err != nil {
+		logrus.WithError(err).Fatal("Failed to parse loglevel")
+	}
+	logrus.SetLevel(logLevel)
 	log := logrus.StandardLogger().WithField("plugin", labels.NeedsRebase)
 
 	secretAgent := &secret.Agent{}
-	if err := secretAgent.Start([]string{o.github.TokenPath, o.webhookSecretFile}); err != nil {
+	secrets := []string{o.webhookSecretFile}
+	if o.github.TokenPath != "" {
+		secrets = append(secrets, o.github.TokenPath)
+	}
+	if err := secretAgent.Start(secrets); err != nil {
 		logrus.WithError(err).Fatal("Error starting secrets agent.")
 	}
 
@@ -102,7 +114,7 @@ func main() {
 	if err != nil {
 		logrus.WithError(err).Fatal("Error getting GitHub client.")
 	}
-	githubClient.Throttle(360, 360)
+	githubClient.Throttle(o.hourlyTokens, o.hourlyTokens)
 
 	server := &Server{
 		tokenGenerator: secretAgent.GetTokenGenerator(o.webhookSecretFile),
@@ -114,11 +126,14 @@ func main() {
 
 	interrupts.TickLiteral(func() {
 		start := time.Now()
-		if err := plugin.HandleAll(log, githubClient, pa.Config()); err != nil {
+		if err := plugin.HandleAll(log, githubClient, pa.Config(), o.github.AppID != ""); err != nil {
 			log.WithError(err).Error("Error during periodic update of all PRs.")
 		}
 		log.WithField("duration", fmt.Sprintf("%v", time.Since(start))).Info("Periodic update complete.")
 	}, o.updatePeriod)
+
+	health := pjutil.NewHealthOnPort(o.instrumentationOptions.HealthPort)
+	health.ServeReady()
 
 	mux := http.NewServeMux()
 	mux.Handle("/", server)

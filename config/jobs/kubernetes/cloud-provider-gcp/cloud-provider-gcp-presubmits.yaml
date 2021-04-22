@@ -33,12 +33,24 @@ presubmits:
       preset-k8s-ssh: "true"
     annotations:
       testgrid-dashboards: provider-gcp-presubmits
-      description: End to end cluster creation test using cluster/kube-up based on kubernetes/cloud-provider-gcp.
+      description: End to end cluster creation test using kubetest2 based on kubernetes/cloud-provider-gcp.
       testgrid-num-columns-recent: '30'
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
         command:
         - runner.sh
         args:
-        - test/e2e.sh
+        - "/bin/bash"
+        - "-c"
+        - set -o errexit;
+          set -o nounset;
+          set -o pipefail;
+          set -o xtrace;
+          REPO_ROOT=$(git rev-parse --show-toplevel);
+          cd;
+          export GO111MODULE=on;
+          go get sigs.k8s.io/kubetest2@latest;
+          go get sigs.k8s.io/kubetest2/kubetest2-gce@latest;
+          go get sigs.k8s.io/kubetest2/kubetest2-tester-exec@latest;
+          kubetest2 gce -v 2 --repo-root $REPO_ROOT --build --up --down;

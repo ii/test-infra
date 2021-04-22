@@ -47,19 +47,19 @@ type TideContextPolicy struct {
 
 // TideOrgContextPolicy overrides the policy for an org, and any repo overrides.
 type TideOrgContextPolicy struct {
-	TideContextPolicy
-	Repos map[string]TideRepoContextPolicy `json:"repos,omitempty"`
+	TideContextPolicy `json:",inline"`
+	Repos             map[string]TideRepoContextPolicy `json:"repos,omitempty"`
 }
 
 // TideRepoContextPolicy overrides the policy for repo, and any branch overrides.
 type TideRepoContextPolicy struct {
-	TideContextPolicy
-	Branches map[string]TideContextPolicy `json:"branches,omitempty"`
+	TideContextPolicy `json:",inline"`
+	Branches          map[string]TideContextPolicy `json:"branches,omitempty"`
 }
 
 // TideContextPolicyOptions holds the default policy, and any org overrides.
 type TideContextPolicyOptions struct {
-	TideContextPolicy
+	TideContextPolicy `json:",inline"`
 	// GitHub Orgs
 	Orgs map[string]TideOrgContextPolicy `json:"orgs,omitempty"`
 }
@@ -71,6 +71,11 @@ type TideMergeCommitTemplate struct {
 
 	Title *template.Template `json:"-"`
 	Body  *template.Template `json:"-"`
+}
+
+// TidePriority contains a list of labels used to prioritize PRs in the merge pool
+type TidePriority struct {
+	Labels []string `json:"labels,omitempty"`
 }
 
 // Tide is config for the tide pool.
@@ -140,12 +145,38 @@ type Tide struct {
 	ContextOptions TideContextPolicyOptions `json:"context_options,omitempty"`
 
 	// BatchSizeLimitMap is a key/value pair of an org or org/repo as the key and
-	// integer batch size limit as the value. The empty string key can be used as
-	// a global default.
+	// integer batch size limit as the value. Use "*" as key to set a global default.
 	// Special values:
 	//  0 => unlimited batch size
 	// -1 => batch merging disabled :(
 	BatchSizeLimitMap map[string]int `json:"batch_size_limit,omitempty"`
+
+	// Priority is an ordered list of sets of labels that would be prioritized before other PRs
+	// PRs should match all labels contained in a set to be prioritized. The first entry has
+	// the highest priority.
+	Priority []TidePriority `json:"priority,omitempty"`
+
+	// PrioritizeExistingBatches configures on org or org/repo level if Tide should continue
+	// testing pre-existing batches instead of immediately including new PRs as they become
+	// eligible. Continuing on an old batch allows to re-use all existing test results whereas
+	// starting a new one requires to start new instances of all tests.
+	// Use '*' as key to set this globally. Defaults to true.
+	PrioritizeExistingBatchesMap map[string]bool `json:"prioritize_existing_batches,omitempty"`
+}
+
+func (t *Tide) PrioritizeExistingBatches(repo OrgRepo) bool {
+	if val, set := t.PrioritizeExistingBatchesMap[repo.String()]; set {
+		return val
+	}
+	if val, set := t.PrioritizeExistingBatchesMap[repo.Org]; set {
+		return val
+	}
+
+	if val, set := t.PrioritizeExistingBatchesMap["*"]; set {
+		return val
+	}
+
+	return true
 }
 
 func (t *Tide) BatchSizeLimit(repo OrgRepo) int {
@@ -196,55 +227,97 @@ func (t *Tide) GetPRStatusBaseURL(repo OrgRepo) string {
 // TideQuery is turned into a GitHub search query. See the docs for details:
 // https://help.github.com/articles/searching-issues-and-pull-requests/
 type TideQuery struct {
-	Orgs          []string `json:"orgs,omitempty"`
-	Repos         []string `json:"repos,omitempty"`
-	ExcludedRepos []string `json:"excludedRepos,omitempty"`
-
 	Author string `json:"author,omitempty"`
-
-	ExcludedBranches []string `json:"excludedBranches,omitempty"`
-	IncludedBranches []string `json:"includedBranches,omitempty"`
 
 	Labels        []string `json:"labels,omitempty"`
 	MissingLabels []string `json:"missingLabels,omitempty"`
 
+	ExcludedBranches []string `json:"excludedBranches,omitempty"`
+	IncludedBranches []string `json:"includedBranches,omitempty"`
+
 	Milestone string `json:"milestone,omitempty"`
 
 	ReviewApprovedRequired bool `json:"reviewApprovedRequired,omitempty"`
+
+	Orgs          []string `json:"orgs,omitempty"`
+	Repos         []string `json:"repos,omitempty"`
+	ExcludedRepos []string `json:"excludedRepos,omitempty"`
+}
+
+// constructQuery returns a map[org][]orgSpecificQueryParts (org, repo, -repo), remainingQueryString
+func (tq *TideQuery) constructQuery() (map[string][]string, string) {
+	// map org->repo directives (if any)
+	orgScopedIdentifiers := map[string][]string{}
+	for _, o := range tq.Orgs {
+		if _, ok := orgScopedIdentifiers[o]; !ok {
+			orgScopedIdentifiers[o] = []string{fmt.Sprintf(`org:"%s"`, o)}
+		}
+	}
+	for _, r := range tq.Repos {
+		if org, _, ok := splitOrgRepoString(r); ok {
+			orgScopedIdentifiers[org] = append(orgScopedIdentifiers[org], fmt.Sprintf("repo:\"%s\"", r))
+		}
+	}
+
+	for _, r := range tq.ExcludedRepos {
+		if org, _, ok := splitOrgRepoString(r); ok {
+			orgScopedIdentifiers[org] = append(orgScopedIdentifiers[org], fmt.Sprintf("-repo:\"%s\"", r))
+		}
+	}
+
+	queryString := []string{"is:pr", "state:open", "archived:false"}
+	if tq.Author != "" {
+		queryString = append(queryString, fmt.Sprintf("author:\"%s\"", tq.Author))
+	}
+	for _, b := range tq.ExcludedBranches {
+		queryString = append(queryString, fmt.Sprintf("-base:\"%s\"", b))
+	}
+	for _, b := range tq.IncludedBranches {
+		queryString = append(queryString, fmt.Sprintf("base:\"%s\"", b))
+	}
+	for _, l := range tq.Labels {
+		queryString = append(queryString, fmt.Sprintf("label:\"%s\"", l))
+	}
+	for _, l := range tq.MissingLabels {
+		queryString = append(queryString, fmt.Sprintf("-label:\"%s\"", l))
+	}
+	if tq.Milestone != "" {
+		queryString = append(queryString, fmt.Sprintf("milestone:\"%s\"", tq.Milestone))
+	}
+	if tq.ReviewApprovedRequired {
+		queryString = append(queryString, "review:approved")
+	}
+
+	return orgScopedIdentifiers, strings.Join(queryString, " ")
+}
+
+func splitOrgRepoString(orgRepo string) (string, string, bool) {
+	split := strings.Split(orgRepo, "/")
+	if len(split) != 2 {
+		// Just do it like the github search itself and ignore invalid orgRepo identifiers
+		return "", "", false
+	}
+	return split[0], split[1], true
+}
+
+// OrgQueries returns the GitHub search string for the query, sharded
+// by org.
+func (tq *TideQuery) OrgQueries() map[string]string {
+	orgRepoIdentifiers, queryString := tq.constructQuery()
+	result := map[string]string{}
+	for org, repoIdentifiers := range orgRepoIdentifiers {
+		result[org] = queryString + " " + strings.Join(repoIdentifiers, " ")
+	}
+
+	return result
 }
 
 // Query returns the corresponding github search string for the tide query.
 func (tq *TideQuery) Query() string {
-	toks := []string{"is:pr", "state:open"}
-	for _, o := range tq.Orgs {
-		toks = append(toks, fmt.Sprintf("org:\"%s\"", o))
-	}
-	for _, r := range tq.Repos {
-		toks = append(toks, fmt.Sprintf("repo:\"%s\"", r))
-	}
-	for _, r := range tq.ExcludedRepos {
-		toks = append(toks, fmt.Sprintf("-repo:\"%s\"", r))
-	}
-	if tq.Author != "" {
-		toks = append(toks, fmt.Sprintf("author:\"%s\"", tq.Author))
-	}
-	for _, b := range tq.ExcludedBranches {
-		toks = append(toks, fmt.Sprintf("-base:\"%s\"", b))
-	}
-	for _, b := range tq.IncludedBranches {
-		toks = append(toks, fmt.Sprintf("base:\"%s\"", b))
-	}
-	for _, l := range tq.Labels {
-		toks = append(toks, fmt.Sprintf("label:\"%s\"", l))
-	}
-	for _, l := range tq.MissingLabels {
-		toks = append(toks, fmt.Sprintf("-label:\"%s\"", l))
-	}
-	if tq.Milestone != "" {
-		toks = append(toks, fmt.Sprintf("milestone:\"%s\"", tq.Milestone))
-	}
-	if tq.ReviewApprovedRequired {
-		toks = append(toks, "review:approved")
+	orgRepoIdentifiers, queryString := tq.constructQuery()
+	toks := []string{queryString}
+	for _, repoIdentifiers := range orgRepoIdentifiers {
+		toks = append(toks, repoIdentifiers...)
 	}
 	return strings.Join(toks, " ")
 }

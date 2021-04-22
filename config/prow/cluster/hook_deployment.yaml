@@ -38,7 +38,7 @@ spec:
       terminationGracePeriodSeconds: 180
       containers:
       - name: hook
-        image: gcr.io/k8s-prow/hook:v20200518-8da074ad4
+        image: gcr.io/k8s-prow/hook:v20210421-8709509fc9
         imagePullPolicy: Always
         args:
         - --dry-run=false
@@ -48,6 +48,10 @@ spec:
         - --github-token-path=/etc/github/oauth
         - --config-path=/etc/config/config.yaml
         - --job-config-path=/etc/job-config
+        env:
+        # Use KUBECONFIG envvar rather than --kubeconfig flag in order to provide multiple configs to merge.
+        - name: KUBECONFIG
+          value: "/etc/kubeconfig/config"
         ports:
           - name: http
             containerPort: 8888
@@ -74,6 +78,9 @@ spec:
           readOnly: true
         - name: unsplash-api
           mountPath: /etc/unsplash-api
+          readOnly: true
+        - name: kubeconfig
+          mountPath: /etc/kubeconfig
           readOnly: true
         livenessProbe:
           httpGet:
@@ -113,3 +120,7 @@ spec:
       - name: unsplash-api
         secret:
           secretName: unsplash-api-key
+      - name: kubeconfig
+        secret:
+          defaultMode: 420
+          secretName: kubeconfig

@@ -147,7 +147,7 @@ func TestUpdateCommitData(t *testing.T) {
 	org := "kubernetes"
 	repo := "test-infra"
 	for _, tc := range cases {
-		updateCommitData(tc.before, org, repo, tc.hash, tc.buildTime, tc.width)
+		updateCommitData(tc.before, "github.com", org, repo, tc.hash, tc.buildTime, tc.width)
 		for hash, expCommit := range tc.after {
 			if commit, ok := tc.before[hash]; ok {
 				if commit.HashPrefix != expCommit.HashPrefix {
@@ -165,6 +165,50 @@ func TestUpdateCommitData(t *testing.T) {
 			} else {
 				t.Errorf("%s: expected commit %s not found", tc.name, hash)
 			}
+		}
+	}
+}
+
+func TestGetPullCommitHash(t *testing.T) {
+	cases := []struct {
+		pull       string
+		commitHash string
+		expErr     bool
+	}{
+		{
+			pull:       "main:4fe6d226e0455ef3d16c1f639a4010d699d0d097,21354:6cf03d53a14f6287d2175b0e9f3fbb31d91981a7",
+			commitHash: "6cf03d53a14f6287d2175b0e9f3fbb31d91981a7",
+		},
+		{
+			pull:       "release45-v8.0:5b30685f6bbf7a0bfef3fa8f2ebe2626ec1df391,54884:d1e309d8d10388000a34b1f705fd78c648ea5faa",
+			commitHash: "d1e309d8d10388000a34b1f705fd78c648ea5faa",
+		},
+		{
+			pull:   "main:6c1db48d6911675873b25457dbe61adca0d428a0,pullre:4905771e4f06c00385d7b1ac3c6de76f173e0212",
+			expErr: true,
+		},
+		{
+			pull:   "23545",
+			expErr: true,
+		},
+		{
+			pull:   "main:6c1db48d6911675873b25457dbe61adca0d428a0,12354:548461",
+			expErr: true,
+		},
+		{
+			pull:   "main:6c1db48d6,12354:e3e9d3eaa3a43f0a4fac47eccd379f077bee6789",
+			expErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		commitHash, err := getPullCommitHash(tc.pull)
+		if (err != nil) != tc.expErr {
+			t.Errorf("%q: unexpected error: %v", tc.pull, err)
+			continue
+		}
+		if commitHash != tc.commitHash {
+			t.Errorf("%s: expected commit hash to be '%s', got '%s'", tc.pull, tc.commitHash, commitHash)
 		}
 	}
 }
@@ -391,16 +435,17 @@ func TestGetGCSDirsForPR(t *testing.T) {
 			config: &config.Config{
 				ProwConfig: config.ProwConfig{
 					Plank: config.Plank{
-						DefaultDecorationConfigs: map[string]*prowapi.DecorationConfig{
-							"*": {
-								GCSConfiguration: &prowapi.GCSConfiguration{
-									Bucket:       "krusty-krab",
-									PathStrategy: "legacy",
-									DefaultOrg:   "kubernetes",
-									DefaultRepo:  "kubernetes",
+						DefaultDecorationConfigs: config.DefaultDecorationMapToSliceTesting(
+							map[string]*prowapi.DecorationConfig{
+								"*": {
+									GCSConfiguration: &prowapi.GCSConfiguration{
+										Bucket:       "krusty-krab",
+										PathStrategy: "legacy",
+										DefaultOrg:   "kubernetes",
+										DefaultRepo:  "kubernetes",
+									},
 								},
-							},
-						},
+							}),
 					},
 				},
 				JobConfig: config.JobConfig{
@@ -434,12 +479,11 @@ func TestGetGCSDirsForPR(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		gitHubClient := &fakegithub.FakeClient{
-			PullRequests: map[int]*github.PullRequest{
-				123: {Number: 123},
-			},
+		gitHubClient := fakegithub.NewFakeClient()
+		gitHubClient.PullRequests = map[int]*github.PullRequest{
+			123: {Number: 123},
 		}
-		toSearch, err := getGCSDirsForPR(tc.config, gitHubClient, nil, tc.org, tc.repo, tc.pr)
+		toSearch, err := getStorageDirsForPR(tc.config, gitHubClient, nil, tc.org, tc.repo, tc.pr)
 		if (err != nil) != tc.expErr {
 			t.Errorf("%s: unexpected error %v", tc.name, err)
 		}
@@ -489,15 +533,19 @@ func Test_getPRHistory(t *testing.T) {
 		},
 		ProwConfig: config.ProwConfig{
 			Plank: config.Plank{
-				DefaultDecorationConfigs: map[string]*prowapi.DecorationConfig{
-					"*": {
-						GCSConfiguration: &prowapi.GCSConfiguration{
-							Bucket:       "gs://kubernetes-jenkins",
-							PathStrategy: prowapi.PathStrategyLegacy,
-							DefaultOrg:   "kubernetes",
+				DefaultDecorationConfigs: config.DefaultDecorationMapToSliceTesting(
+					map[string]*prowapi.DecorationConfig{
+						"*": {
+							GCSConfiguration: &prowapi.GCSConfiguration{
+								Bucket:       "gs://kubernetes-jenkins",
+								PathStrategy: prowapi.PathStrategyLegacy,
+								DefaultOrg:   "kubernetes",
+							},
 						},
-					},
-				},
+					}),
+			},
+			Deck: config.Deck{
+				AllKnownStorageBuckets: sets.NewString("kubernetes-jenkins"),
 			},
 		},
 	}
@@ -598,7 +646,7 @@ func Test_getPRHistory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			prHistoryURL, _ := url.Parse(tt.args.url)
-			got, err := getPRHistory(context.Background(), prHistoryURL, c, io.NewGCSOpener(fakeGCSClient), nil, nil)
+			got, err := getPRHistory(context.Background(), prHistoryURL, c, io.NewGCSOpener(fakeGCSClient), nil, nil, "github.com")
 			if (err != nil) != tt.wantErr {
 				t.Errorf("getPRHistory() error = %v, wantErr %v", err, tt.wantErr)
 				return

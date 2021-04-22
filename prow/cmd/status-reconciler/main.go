@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"os"
 	"time"
@@ -26,9 +27,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"k8s.io/test-infra/pkg/flagutil"
-	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/config/secret"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
+	configflagutil "k8s.io/test-infra/prow/flagutil/config"
 	"k8s.io/test-infra/prow/interrupts"
 	"k8s.io/test-infra/prow/logrusutil"
 	"k8s.io/test-infra/prow/pjutil"
@@ -42,16 +43,18 @@ const (
 )
 
 type options struct {
-	configPath    string
-	jobConfigPath string
-	pluginConfig  string
+	config       configflagutil.ConfigOptions
+	pluginConfig string
 
-	continueOnError         bool
-	addedPresubmitBlacklist prowflagutil.Strings
-	dryRun                  bool
-	kubernetes              prowflagutil.KubernetesOptions
-	github                  prowflagutil.GitHubOptions
-	storage                 prowflagutil.StorageClientOptions
+	continueOnError           bool
+	addedPresubmitDenylist    prowflagutil.Strings
+	addedPresubmitDenylistAll prowflagutil.Strings
+	addedPresubmitBlacklist   prowflagutil.Strings
+	dryRun                    bool
+	kubernetes                prowflagutil.KubernetesOptions
+	github                    prowflagutil.GitHubOptions
+	storage                   prowflagutil.StorageClientOptions
+	instrumentationOptions    prowflagutil.InstrumentationOptions
 
 	tokenBurst    int
 	tokensPerHour int
@@ -64,19 +67,19 @@ type options struct {
 }
 
 func gatherOptions(fs *flag.FlagSet, args ...string) options {
-	o := options{}
+	o := options{config: configflagutil.ConfigOptions{ConfigPath: "/etc/config/config.yaml"}}
 
-	fs.StringVar(&o.configPath, "config-path", "/etc/config/config.yaml", "Path to config.yaml.")
-	fs.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
 	fs.StringVar(&o.pluginConfig, "plugin-config", "/etc/plugins/plugins.yaml", "Path to plugin config file.")
 	fs.StringVar(&o.statusURI, "status-path", "", "The /local/path, gs://path/to/object or s3://path/to/object to store status controller state. GCS writes will use the default object ACL for the bucket.")
 
 	fs.BoolVar(&o.continueOnError, "continue-on-error", false, "Indicates that the migration should continue if context migration fails for an individual PR.")
-	fs.Var(&o.addedPresubmitBlacklist, "blacklist", "Org or org/repo to ignore new added presubmits for, set more than once to add more.")
+	fs.Var(&o.addedPresubmitDenylist, "denylist", "Org or org/repo to ignore new added presubmits for, set more than once to add more.")
+	fs.Var(&o.addedPresubmitDenylistAll, "denylist-all", "Org or org/repo to ignore reconciling, set more than once to add more.")
+	fs.Var(&o.addedPresubmitBlacklist, "blacklist", "[Will be deprecated after May 2021] Org or org/repo to ignore new added presubmits for, set more than once to add more.")
 	fs.BoolVar(&o.dryRun, "dry-run", true, "Whether or not to make mutating API calls to GitHub.")
 	fs.IntVar(&o.tokensPerHour, "tokens", defaultTokens, "Throttle hourly token consumption (0 to disable)")
 	fs.IntVar(&o.tokenBurst, "token-burst", defaultBurst, "Allow consuming a subset of hourly tokens in a short burst")
-	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.github, &o.storage} {
+	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.github, &o.storage, &o.instrumentationOptions, &o.config} {
 		group.AddFlags(fs)
 	}
 	fs.Parse(args)
@@ -84,13 +87,30 @@ func gatherOptions(fs *flag.FlagSet, args ...string) options {
 }
 
 func (o *options) Validate() error {
-	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.github, &o.storage} {
+	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.github, &o.storage, &o.config} {
 		if err := group.Validate(o.dryRun); err != nil {
 			return err
 		}
 	}
+	if len(o.addedPresubmitBlacklist.Strings()) > 0 {
+		if len(o.addedPresubmitDenylist.Strings()) > 0 {
+			return errors.New("--denylist and --blacklist are mutual exclusive")
+		}
+	}
 
 	return nil
+}
+
+func (o *options) getDenyList() sets.String {
+	denyList := o.addedPresubmitDenylist.Strings()
+	denyList = append(o.addedPresubmitBlacklist.Strings(), denyList...)
+
+	return sets.NewString(denyList...)
+}
+
+func (o *options) getDenyListAll() sets.String {
+	denyListAll := o.addedPresubmitDenylistAll.Strings()
+	return sets.NewString(denyListAll...)
 }
 
 func main() {
@@ -103,10 +123,10 @@ func main() {
 
 	defer interrupts.WaitForGracefulShutdown()
 
-	pjutil.ServePProf()
+	pjutil.ServePProf(o.instrumentationOptions.PProfPort)
 
-	configAgent := &config.Agent{}
-	if err := configAgent.Start(o.configPath, o.jobConfigPath); err != nil {
+	configAgent, err := o.config.ConfigAgent()
+	if err != nil {
 		logrus.WithError(err).Fatal("Error starting config agent.")
 	}
 
@@ -142,7 +162,7 @@ func main() {
 		logrus.WithError(err).Fatal("Cannot create opener")
 	}
 
-	c := statusreconciler.NewController(o.continueOnError, sets.NewString(o.addedPresubmitBlacklist.Strings()...), opener, o.configPath, o.jobConfigPath, o.statusURI, prowJobClient, githubClient, pluginAgent)
+	c := statusreconciler.NewController(o.continueOnError, o.getDenyList(), o.getDenyListAll(), opener, o.config, o.statusURI, prowJobClient, githubClient, pluginAgent)
 	interrupts.Run(func(ctx context.Context) {
 		c.Run(ctx)
 	})

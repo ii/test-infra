@@ -20,6 +20,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/diff"
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
@@ -173,6 +175,55 @@ func TestPerformArgReplacements(t *testing.T) {
 			if tc.expectErr {
 				t.Fatalf("Expected an error, but got %v", result)
 			}
+			if !reflect.DeepEqual(result, tc.expected) {
+				t.Errorf("Expected result %v, but got %v instead", tc.expected, result)
+			}
+		})
+	}
+}
+
+func TestPerformArgDeletions(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      map[string]string
+		deletions string
+		expected  map[string]string
+	}{
+		{
+			name:      "nil arguments remain nil",
+			args:      nil,
+			deletions: "",
+			expected:  nil,
+		},
+		{
+			name:      "empty arguments remain empty",
+			args:      map[string]string{},
+			deletions: "",
+			expected:  map[string]string{},
+		},
+		{
+			name:      "empty deletions do nothing",
+			args:      map[string]string{"foo": "bar"},
+			deletions: "",
+			expected:  map[string]string{"foo": "bar"},
+		},
+		{
+			name:      "simple deletion works",
+			args:      map[string]string{"foo": "bar", "baz": "baz2"},
+			deletions: "foo",
+			expected:  map[string]string{"baz": "baz2"},
+		},
+		{
+			name:      "multiple deletions work",
+			args:      map[string]string{"foo": "bar", "baz": "baz2", "hello": "world"},
+			deletions: "foo, baz",
+			expected:  map[string]string{"hello": "world"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := performDeletion(tc.args, tc.deletions)
 			if !reflect.DeepEqual(result, tc.expected) {
 				t.Errorf("Expected result %v, but got %v instead", tc.expected, result)
 			}
@@ -533,6 +584,21 @@ func TestGeneratePeriodics(t *testing.T) {
 			},
 		},
 		{
+			Cron: "0 * * * *",
+			JobBase: config.JobBase{
+				Name: "generic-periodic-with-deletions-master",
+				Annotations: map[string]string{
+					forkAnnotation:     "true",
+					deletionAnnotation: "preset-e2e-scalability-periodics-master",
+					suffixAnnotation:   "true",
+				},
+				Labels: map[string]string{
+					"preset-e2e-scalability-periodics":        "true",
+					"preset-e2e-scalability-periodics-master": "true",
+				},
+			},
+		},
+		{
 			Interval: "1h",
 			JobBase: config.JobBase{
 				Name: "periodic-with-replacements",
@@ -589,6 +655,16 @@ func TestGeneratePeriodics(t *testing.T) {
 			},
 		},
 		{
+			Cron: "0 * * * *",
+			JobBase: config.JobBase{
+				Name:        "generic-periodic-with-deletions-beta",
+				Annotations: map[string]string{suffixAnnotation: "true", testgridDashboardsAnnotation: "sig-release-job-config-errors"},
+				Labels: map[string]string{
+					"preset-e2e-scalability-periodics": "true",
+				},
+			},
+		},
+		{
 			Interval: "6h",
 			JobBase: config.JobBase{
 				Name: "periodic-with-replacements-1-15",
@@ -627,7 +703,7 @@ func TestGeneratePeriodics(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(result, expected) {
-		t.Errorf("Result does not match expected. Difference:\n%s", diff.ObjectDiff(expected, result))
+		t.Errorf("Result does not match expected. Difference:\n%s\n", cmp.Diff(expected, result, cmpopts.IgnoreUnexported(config.Periodic{})))
 	}
 }
 

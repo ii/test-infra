@@ -1,8 +1,9 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
-reviwers:
+reviewers:
 - andyzhangx
 - brendandburns
+- chewong
 - feiskyer
 - justaugustus
 - karataliu
@@ -10,6 +11,7 @@ reviwers:
 approvers:
 - andyzhangx
 - brendandburns
+- chewong
 - feiskyer
 - justaugustus
 - karataliu

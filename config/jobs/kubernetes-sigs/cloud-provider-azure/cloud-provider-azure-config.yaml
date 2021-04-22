@@ -10,14 +10,14 @@ presubmits:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
         command:
         - runner.sh
         args:
         - make
         - test-check
     annotations:
-      testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-presubmit
+      testgrid-dashboards: provider-azure-cloud-provider-azure
       testgrid-tab-name: pr-cloud-provider-azure-check
       description: "Run lint check tests for cloud-provider-azure."
       testgrid-num-columns-recent: '30'
@@ -37,12 +37,12 @@ presubmits:
     extra_refs:
     - org: kubernetes
       repo: kubernetes
-      base_ref: release-1.18
+      base_ref: release-1.21
       path_alias: k8s.io/kubernetes
       workdir: true
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
         command:
         - runner.sh
         - kubetest
@@ -59,7 +59,7 @@ presubmits:
         - --aksengine-agentpoolcount=2
         - --aksengine-admin-username=azureuser
         - --aksengine-creds=$(AZURE_CREDENTIALS)
-        - --aksengine-orchestratorRelease=1.18
+        - --aksengine-orchestratorRelease=1.21
         - --aksengine-mastervmsize=Standard_DS2_v2
         - --aksengine-agentvmsize=Standard_D4s_v3
         - --aksengine-ccm
@@ -68,19 +68,19 @@ presubmits:
         - --aksengine-location=westus2
         - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
         - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux.json
-        - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+        - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
         # Specific test args
         - --test_args=--ginkgo.focus=\[Conformance\]|\[NodeConformance\] --ginkgo.skip=\[Slow\]|\[Serial\]|\[Flaky\]
         - --ginkgo-parallel=30
         securityContext:
           privileged: true
     annotations:
-      testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-presubmit
+      testgrid-dashboards: provider-azure-cloud-provider-azure
       testgrid-tab-name: pr-cloud-provider-azure-e2e
       description: "Run Kubernetes e2e tests for cloud-provider-azure."
       testgrid-num-columns-recent: '30'
-  # pull-cloud-provider-azure-e2e-ccm runs Azure specific e2e tests.
-  - name: pull-cloud-provider-azure-e2e-ccm
+  # pull-cloud-provider-azure-e2e-ccm-vmss-basic-lb runs Azure specific e2e tests with VMSS and basic loadbalancer.
+  - name: pull-cloud-provider-azure-e2e-ccm-vmss-basic-lb
     always_run: true
     decorate: true
     decoration_config:
@@ -95,12 +95,12 @@ presubmits:
     extra_refs:
     - org: kubernetes
       repo: kubernetes
-      base_ref: release-1.18
+      base_ref: release-1.21
       path_alias: k8s.io/kubernetes
       workdir: true
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
         command:
         - runner.sh
         - kubetest
@@ -117,7 +117,7 @@ presubmits:
         - --aksengine-agentpoolcount=2
         - --aksengine-admin-username=azureuser
         - --aksengine-creds=$(AZURE_CREDENTIALS)
-        - --aksengine-orchestratorRelease=1.18
+        - --aksengine-orchestratorRelease=1.21
         - --aksengine-mastervmsize=Standard_DS2_v2
         - --aksengine-agentvmsize=Standard_D4s_v3
         - --aksengine-ccm
@@ -125,16 +125,141 @@ presubmits:
         - --aksengine-deploy-custom-k8s
         - --aksengine-location=westus2
         - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
-        - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux.json
-        - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+        - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-vmss-basic-lb.json
+        - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
         # Specific test args
         - --test-ccm
         - --ginkgo-parallel=30
         securityContext:
           privileged: true
+        env:
+        - name: K8S_AZURE_LOADBALANCE_SKU
+          value: "basic"
     annotations:
-      testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-presubmit
+      testgrid-dashboards: provider-azure-cloud-provider-azure
+      testgrid-tab-name: pr-cloud-provider-azure-e2e-ccm-vmss-basic-lb
+      description: "Runs Azure specific tests (VMSS + basic LB) with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure)."
+      testgrid-num-columns-recent: '30'
+    # pull-cloud-provider-azure-e2e-ccm runs Azure specific e2e tests.
+  - name: pull-cloud-provider-azure-e2e-ccm
+    always_run: true
+    decorate: true
+    decoration_config:
+      timeout: 5h
+    path_alias: sigs.k8s.io/cloud-provider-azure
+    branches:
+      - master
+    labels:
+      preset-service-account: "true"
+      preset-azure-cred: "true"
+      preset-dind-enabled: "true"
+    extra_refs:
+      - org: kubernetes
+        repo: kubernetes
+        base_ref: release-1.21
+        path_alias: k8s.io/kubernetes
+        workdir: true
+    spec:
+      containers:
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
+          command:
+            - runner.sh
+            - kubetest
+          args:
+            # Generic e2e test args
+            - --test
+            - --up
+            - --down
+            - --build=quick
+            - --dump=$(ARTIFACTS)
+            # Azure-specific test args
+            - --provider=skeleton
+            - --deployment=aksengine
+            - --aksengine-agentpoolcount=2
+            - --aksengine-admin-username=azureuser
+            - --aksengine-creds=$(AZURE_CREDENTIALS)
+            - --aksengine-orchestratorRelease=1.21
+            - --aksengine-mastervmsize=Standard_DS2_v2
+            - --aksengine-agentvmsize=Standard_D4s_v3
+            - --aksengine-ccm
+            - --aksengine-cnm
+            - --aksengine-deploy-custom-k8s
+            - --aksengine-location=westus2
+            - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
+            - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux.json
+            - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
+            # Specific test args
+            - --test-ccm
+            - --ginkgo-parallel=30
+          securityContext:
+            privileged: true
+          env:
+            - name: K8S_AZURE_LOADBALANCE_SKU
+              value: "standard"
+    annotations:
+      testgrid-dashboards: provider-azure-cloud-provider-azure
       testgrid-tab-name: pr-cloud-provider-azure-e2e-ccm
+      description: "Runs Azure specific tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure)."
+      testgrid-num-columns-recent: '30'
+    # pull-cloud-provider-azure-e2e-ccm-vmss runs Azure specific e2e tests with vmss.
+  - name: pull-cloud-provider-azure-e2e-ccm-vmss
+    always_run: true
+    decorate: true
+    decoration_config:
+      timeout: 5h
+    path_alias: sigs.k8s.io/cloud-provider-azure
+    branches:
+      - master
+    labels:
+      preset-service-account: "true"
+      preset-azure-cred: "true"
+      preset-dind-enabled: "true"
+    extra_refs:
+      - org: kubernetes
+        repo: kubernetes
+        base_ref: release-1.21
+        path_alias: k8s.io/kubernetes
+        workdir: true
+    spec:
+      containers:
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
+          command:
+            - runner.sh
+            - kubetest
+          args:
+            # Generic e2e test args
+            - --test
+            - --up
+            - --down
+            - --build=quick
+            - --dump=$(ARTIFACTS)
+            # Azure-specific test args
+            - --provider=skeleton
+            - --deployment=aksengine
+            - --aksengine-agentpoolcount=2
+            - --aksengine-admin-username=azureuser
+            - --aksengine-creds=$(AZURE_CREDENTIALS)
+            - --aksengine-orchestratorRelease=1.21
+            - --aksengine-mastervmsize=Standard_DS2_v2
+            - --aksengine-agentvmsize=Standard_D4s_v3
+            - --aksengine-ccm
+            - --aksengine-cnm
+            - --aksengine-deploy-custom-k8s
+            - --aksengine-location=westus2
+            - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
+            - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-vmss.json
+            - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
+            # Specific test args
+            - --test-ccm
+            - --ginkgo-parallel=30
+          securityContext:
+            privileged: true
+          env:
+            - name: K8S_AZURE_LOADBALANCE_SKU
+              value: "standard"
+    annotations:
+      testgrid-dashboards: provider-azure-cloud-provider-azure
+      testgrid-tab-name: pr-cloud-provider-azure-e2e-ccm-vmss
       description: "Runs Azure specific tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure)."
       testgrid-num-columns-recent: '30'
   - name: pull-cloud-provider-azure-unit
@@ -147,14 +272,14 @@ presubmits:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
         command:
         - runner.sh
         args:
         - make
         - test-unit
     annotations:
-      testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-presubmit
+      testgrid-dashboards: provider-azure-cloud-provider-azure
       testgrid-tab-name: pr-cloud-provider-azure-unit
       description: "Run unit tests for cloud-provider-azure."
       testgrid-num-columns-recent: '30'
@@ -172,7 +297,7 @@ periodics:
   extra_refs:
   - org: kubernetes
     repo: kubernetes
-    base_ref: release-1.18
+    base_ref: release-1.21
     path_alias: k8s.io/kubernetes
   - org: kubernetes-sigs
     repo: cloud-provider-azure
@@ -180,7 +305,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
       command:
       - runner.sh
       - kubetest
@@ -197,7 +322,7 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_DS2_v2
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-ccm
@@ -206,14 +331,17 @@ periodics:
       - --aksengine-location=westus2
       - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
       - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       - --test-ccm
       - --ginkgo-parallel=30
+      env:
+      - name: K8S_AZURE_LOADBALANCE_SKU
+        value: "standard"
       securityContext:
         privileged: true
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: cloud-provider-azure-master
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
     description: "Runs Azure specific tests periodically with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure)."
@@ -230,7 +358,7 @@ periodics:
   extra_refs:
   - org: kubernetes
     repo: kubernetes
-    base_ref: release-1.18
+    base_ref: release-1.21
     path_alias: k8s.io/kubernetes
   - org: kubernetes-sigs
     repo: cloud-provider-azure
@@ -238,7 +366,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
       command:
       - runner.sh
       - kubetest
@@ -255,7 +383,7 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_DS2_v2
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-ccm
@@ -264,7 +392,7 @@ periodics:
       - --aksengine-location=westus2
       - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
       - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-autoscaler.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       - --test-ccm
       - --ginkgo-parallel=1
@@ -273,11 +401,76 @@ periodics:
       env:
       - name: CCM_E2E_ARGS
         value: "-ginkgo.focus=autoscaler"
+      - name: K8S_AZURE_LOADBALANCE_SKU
+        value: "standard"
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: cloud-provider-azure-autoscaling
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
     description: "Runs node autoscaling tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure)."
+- interval: 24h
+  # cloud-provider-azure-autoscaling-multipool runs node autoscaling tests with multiple nodepools periodically.
+  name: cloud-provider-azure-autoscaling-multipool
+  decorate: true
+  decoration_config:
+    timeout: 5h
+  labels:
+    preset-service-account: "true"
+    preset-azure-cred: "true"
+    preset-dind-enabled: "true"
+  extra_refs:
+    - org: kubernetes
+      repo: kubernetes
+      base_ref: release-1.21
+      path_alias: k8s.io/kubernetes
+    - org: kubernetes-sigs
+      repo: cloud-provider-azure
+      base_ref: master
+      path_alias: sigs.k8s.io/cloud-provider-azure
+  spec:
+    containers:
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
+      command:
+      - runner.sh
+      - kubetest
+      args:
+      # Generic e2e test args
+      - --test
+      - --up
+      - --down
+      - --build=quick
+      - --dump=$(ARTIFACTS)
+      # Azure-specific test args
+      - --deployment=aksengine
+      - --provider=skeleton
+      - --aksengine-agentpoolcount=2
+      - --aksengine-admin-username=azureuser
+      - --aksengine-creds=$(AZURE_CREDENTIALS)
+      - --aksengine-orchestratorRelease=1.21
+      - --aksengine-mastervmsize=Standard_DS2_v2
+      - --aksengine-agentvmsize=Standard_D4s_v3
+      - --aksengine-ccm
+      - --aksengine-cnm
+      - --aksengine-deploy-custom-k8s
+      - --aksengine-location=westus2
+      - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
+      - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-autoscaler-multi-nodepool.json
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
+      # Specific test args
+      - --test-ccm
+      - --ginkgo-parallel=1
+      securityContext:
+        privileged: true
+      env:
+      - name: CCM_E2E_ARGS
+        value: "-ginkgo.focus=autoscaler"
+      - name: K8S_AZURE_LOADBALANCE_SKU
+        value: "standard"
+  annotations:
+    testgrid-dashboards: provider-azure-cloud-provider-azure
+    testgrid-tab-name: cloud-provider-azure-autoscaling-multipool
+    testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
+    description: "Runs node multiple nodepools autoscaling tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure)."
 - interval: 24h
   # cloud-provider-azure-conformance runs Kubernetes conformance tests periodically.
   name: cloud-provider-azure-conformance
@@ -291,7 +484,7 @@ periodics:
   extra_refs:
   - org: kubernetes
     repo: kubernetes
-    base_ref: release-1.18
+    base_ref: release-1.21
     path_alias: k8s.io/kubernetes
   - org: kubernetes-sigs
     repo: cloud-provider-azure
@@ -299,7 +492,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
       command:
       - runner.sh
       - kubetest
@@ -316,7 +509,7 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_DS2_v2
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-ccm
@@ -325,14 +518,14 @@ periodics:
       - --aksengine-location=westus2
       - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
       - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       - --test_args=--ginkgo.focus=\[Conformance\]|\[NodeConformance\] --ginkgo.skip=\[Slow\]|\[Serial\]|\[Flaky\]
       - --ginkgo-parallel=30
       securityContext:
         privileged: true
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: cloud-provider-azure-conformance
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
     description: "Runs Kubernetes conformance tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure)."
@@ -349,7 +542,7 @@ periodics:
   extra_refs:
   - org: kubernetes
     repo: kubernetes
-    base_ref: release-1.18
+    base_ref: release-1.21
     path_alias: k8s.io/kubernetes
   - org: kubernetes-sigs
     repo: cloud-provider-azure
@@ -357,7 +550,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
       command:
       - runner.sh
       - kubetest
@@ -374,7 +567,7 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_DS2_v2
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-ccm
@@ -383,14 +576,14 @@ periodics:
       - --aksengine-location=westus2
       - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
       - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/e2e-slow.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       - --test_args=--ginkgo.focus=\[Slow\] --ginkgo.skip=\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]
       - --ginkgo-parallel=4
       securityContext:
         privileged: true
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: cloud-provider-azure-slow
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
     description: "Runs Kubernetes slow tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure)."
@@ -408,7 +601,7 @@ periodics:
   extra_refs:
   - org: kubernetes
     repo: kubernetes
-    base_ref: release-1.18
+    base_ref: release-1.21
     path_alias: k8s.io/kubernetes
   - org: kubernetes
     repo: cloud-provider-azure
@@ -416,7 +609,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
       command:
       - runner.sh
       - kubetest
@@ -433,7 +626,7 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_D4s_v3
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-ccm
@@ -442,7 +635,7 @@ periodics:
       - --aksengine-location=westus2
       - --aksengine-public-key=$(KUBE_SSH_PUBLIC_KEY_PATH)
       - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-vmss-serial.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       # Check https://github.com/kubernetes-sigs/cloud-provider-azure/issues/224 for the status of each skipped test
       - --test_args=--ginkgo.focus=\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\]|regular.resource.usage.tracking.resource.tracking.for|validates.MaxPods.limit.number.of.pods.that.are.allowed.to.run
@@ -456,8 +649,11 @@ periodics:
         value: /etc/ssh-key-secret/ssh-private # Requires preset-k8s-ssh label
       - name: KUBE_SSH_USER
         value: azureuser
+      - name: K8S_AZURE_LOADBALANCE_SKU
+        value: "basic"
+
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: cloud-provider-azure-serial
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
     description: "Runs Kubernetes serial tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure)."
@@ -474,7 +670,7 @@ periodics:
   extra_refs:
   - org: kubernetes
     repo: kubernetes
-    base_ref: release-1.18
+    base_ref: release-1.21
     path_alias: k8s.io/kubernetes
   - org: kubernetes-sigs
     repo: cloud-provider-azure
@@ -482,7 +678,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
       command:
       - runner.sh
       - kubetest
@@ -499,7 +695,7 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_DS2_v2
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-ccm
@@ -508,14 +704,17 @@ periodics:
       - --aksengine-location=westus2
       - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
       - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-vmss.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       - --test-ccm
       - --ginkgo-parallel=30
+      env:
+      - name: K8S_AZURE_LOADBALANCE_SKU
+        value: "standard"
       securityContext:
         privileged: true
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: cloud-provider-azure-master-vmss
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
     description: "Runs Azure specific tests periodically with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure) on VMSS."
@@ -532,7 +731,7 @@ periodics:
   extra_refs:
   - org: kubernetes
     repo: kubernetes
-    base_ref: release-1.18
+    base_ref: release-1.21
     path_alias: k8s.io/kubernetes
   - org: kubernetes-sigs
     repo: cloud-provider-azure
@@ -540,7 +739,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
       command:
       - runner.sh
       - kubetest
@@ -557,7 +756,7 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_DS2_v2
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-ccm
@@ -566,14 +765,14 @@ periodics:
       - --aksengine-location=westus2
       - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
       - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-vmss.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       - --test_args=--ginkgo.focus=\[Conformance\]|\[NodeConformance\] --ginkgo.skip=\[Slow\]|\[Serial\]|\[Flaky\]
       - --ginkgo-parallel=30
       securityContext:
         privileged: true
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: cloud-provider-azure-conformance-vmss
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
     description: "Runs Kubernetes conformance tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure) on VMSS."
@@ -590,7 +789,7 @@ periodics:
   extra_refs:
   - org: kubernetes
     repo: kubernetes
-    base_ref: release-1.18
+    base_ref: release-1.21
     path_alias: k8s.io/kubernetes
   - org: kubernetes-sigs
     repo: cloud-provider-azure
@@ -598,7 +797,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
       command:
       - runner.sh
       - kubetest
@@ -615,7 +814,7 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_DS2_v2
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-ccm
@@ -624,14 +823,14 @@ periodics:
       - --aksengine-location=westus2
       - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
       - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-vmss.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       - --test_args=--ginkgo.focus=\[Slow\] --ginkgo.skip=\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]
       - --ginkgo-parallel=4
       securityContext:
         privileged: true
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: cloud-provider-azure-slow-vmss
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
     description: "Runs Kubernetes slow tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure) on VMSS."
@@ -648,7 +847,7 @@ periodics:
   extra_refs:
   - org: kubernetes
     repo: kubernetes
-    base_ref: release-1.18
+    base_ref: release-1.21
     path_alias: k8s.io/kubernetes
   - org: kubernetes-sigs
     repo: cloud-provider-azure
@@ -656,7 +855,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-1.18
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-1.21
       command:
       - runner.sh
       - kubetest
@@ -673,7 +872,7 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_DS2_v2
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-ccm
@@ -682,7 +881,7 @@ periodics:
       - --aksengine-location=eastus2
       - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
       - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-vmss-multi-zones.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       # Check https://github.com/kubernetes-sigs/cloud-provider-azure/issues/224 for the status of each skipped test
       - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|Delete.Grace.Period|runs.ReplicaSets.to.verify.preemption.running.path|client.go.should.negotiate|should.contain.custom.columns.for.each.resource|Network.should.set.TCP.CLOSE_WAIT.timeout|PodSecurityPolicy
@@ -690,7 +889,7 @@ periodics:
       securityContext:
         privileged: true
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: cloud-provider-azure-multiple-zones
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
     description: "Runs Kubernetes multiple availability zones tests with cloud-provider-azure (https://github.com/kubernetes-sigs/cloud-provider-azure) on VMSS."
@@ -712,7 +911,7 @@ periodics:
     path_alias: k8s.io/kubernetes
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
       command:
       - runner.sh
       - kubetest
@@ -729,21 +928,21 @@ periodics:
       - --aksengine-agentpoolcount=2
       - --aksengine-admin-username=azureuser
       - --aksengine-creds=$(AZURE_CREDENTIALS)
-      - --aksengine-orchestratorRelease=1.18
+      - --aksengine-orchestratorRelease=1.21
       - --aksengine-mastervmsize=Standard_DS2_v2
       - --aksengine-agentvmsize=Standard_D4s_v3
       - --aksengine-deploy-custom-k8s
       - --aksengine-location=eastus2
       - --aksengine-public-key=$(AZURE_SSH_PUBLIC_KEY_FILE)
-      - --aksengine-template-url=https://gist.githubusercontent.com/aramase/a19fcbf1f309dab99600ee9c0d700fce/raw/b1e975f8c6a1d3c9a9ae796245c58c6733029dc3/single-stack-ipv6.json
-      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/v0.48.0/aks-engine-v0.48.0-linux-amd64.tar.gz
+      - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/tests/k8s-azure/manifest/linux-ipv6.json
+      - --aksengine-download-url=https://github.com/Azure/aks-engine/releases/download/nightly/aks-engine-nightly-linux-amd64.tar.gz
       # Specific test args
       - --ginkgo-parallel=30
       - --test_args=--ginkgo.focus=\[Conformance\]|\[NodeConformance\] --ginkgo.skip=\[Slow\]|\[Serial\]|\[Flaky\]
       securityContext:
         privileged: true
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure
     testgrid-tab-name: ci-kubernetes-azure-conformance-ipv6
     description: Runs conformance tests using kubetest against latest kubernetes master with an IPv6 azure cluster
     testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
@@ -756,7 +955,7 @@ periodics:
   decoration_config:
     timeout: 5h
   annotations:
-    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-scalability, provider-azure-periodic
+    testgrid-dashboards: provider-azure-cloud-provider-azure, provider-azure-scalability
     testgrid-tab-name: ci-kubernetes-kubemark-100-azure-test
     testgrid-num-failures-to-alert: '1'
     description: "Runs kubemark tests (100 nodes) with the Azure cloud provider enabled."
@@ -775,7 +974,7 @@ periodics:
     path_alias: sigs.k8s.io/cloud-provider-azure
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
       command:
       - runner.sh
       - kubetest

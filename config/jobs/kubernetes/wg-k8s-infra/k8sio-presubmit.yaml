@@ -8,15 +8,28 @@ presubmits:
     path_alias: k8s.io/k8s.io
     run_if_changed: "^groups/"
     branches:
-    - ^master$
+    - ^main$
     spec:
       containers:
-      - image: golang:1.12
+      - image: golang:1.13
         command:
         - bash
         args:
         - -c
-        - "cd groups && go test ./..."
+        - "cd groups && go test"
         env:
         - name: GO111MODULE
           value: "on"
+  - name: pull-k8sio-verify
+    annotations:
+      testgrid-dashboards: wg-k8s-infra-k8sio
+      testgrid-tab-name: pull-k8sio-verify
+    always_run: true
+    decorate: true
+    spec:
+      containers:
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
+        command:
+        - runner.sh
+        args:
+        - ./hack/verify.sh

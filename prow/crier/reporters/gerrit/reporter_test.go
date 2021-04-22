@@ -17,19 +17,22 @@ limitations under the License.
 package gerrit
 
 import (
+	"context"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/diff"
+	fakectrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
-	pjlister "k8s.io/test-infra/prow/client/listers/prowjobs/v1"
 	"k8s.io/test-infra/prow/gerrit/client"
 	"k8s.io/test-infra/prow/kube"
 )
@@ -58,25 +61,6 @@ func (f *fgc) SetReview(instance, id, revision, message string, labels map[strin
 	}
 	f.reportMessage = message
 	f.reportLabel = labels
-	return nil
-}
-
-type fakeLister struct {
-	pjs []*v1.ProwJob
-}
-
-func (fl fakeLister) List(selector labels.Selector) (ret []*v1.ProwJob, err error) {
-	result := []*v1.ProwJob{}
-	for _, pj := range fl.pjs {
-		if selector.Matches(labels.Set(pj.ObjectMeta.Labels)) {
-			result = append(result, pj)
-		}
-	}
-
-	return result, nil
-}
-
-func (fl fakeLister) ProwJobs(namespace string) pjlister.ProwJobNamespaceLister {
 	return nil
 }
 
@@ -1052,20 +1036,292 @@ func TestReport(t *testing.T) {
 			expectLabel:       map[string]string{"same-label": lbtm},
 			numExpectedReport: 2,
 		},
+		{
+			name: "2 jobs, both failed, job from newer patchset pending, should not report",
+			pj: &v1.ProwJob{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						client.GerritRevision:    "abc",
+						kube.ProwJobTypeLabel:    presubmit,
+						client.GerritReportLabel: "same-label",
+						client.GerritPatchset:    "5",
+						kube.OrgLabel:            "same-org",
+						kube.RepoLabel:           "same-repo",
+						kube.PullLabel:           "123456",
+					},
+					Annotations: map[string]string{
+						client.GerritID:       "123-abc",
+						client.GerritInstance: "gerrit",
+					},
+					CreationTimestamp: metav1.Time{
+						Time: timeNow,
+					},
+				},
+				Status: v1.ProwJobStatus{
+					State: v1.SuccessState,
+					URL:   "guber/foo",
+				},
+				Spec: v1.ProwJobSpec{
+					Type: v1.PresubmitJob,
+					Refs: &v1.Refs{
+						Repo: "foo",
+					},
+					Job: "ci-foo",
+				},
+			},
+			existingPJs: []*v1.ProwJob{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							client.GerritRevision:    "abc",
+							kube.ProwJobTypeLabel:    presubmit,
+							client.GerritReportLabel: "same-label",
+							client.GerritPatchset:    "5",
+							kube.OrgLabel:            "same-org",
+							kube.RepoLabel:           "same-repo",
+							kube.PullLabel:           "123456",
+						},
+						Annotations: map[string]string{
+							client.GerritID:       "123-abc",
+							client.GerritInstance: "gerrit",
+						},
+						CreationTimestamp: metav1.Time{
+							Time: timeNow.Add(-time.Hour),
+						},
+					},
+					Status: v1.ProwJobStatus{
+						State: v1.FailureState,
+						URL:   "guber/bar",
+						PrevReportStates: map[string]v1.ProwJobState{
+							"gerrit-reporter": v1.FailureState,
+						},
+					},
+					Spec: v1.ProwJobSpec{
+						Refs: &v1.Refs{
+							Repo: "bar",
+						},
+						Job:  "ci-bar",
+						Type: v1.PresubmitJob,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							client.GerritRevision:    "abc",
+							kube.ProwJobTypeLabel:    presubmit,
+							client.GerritReportLabel: "same-label",
+							client.GerritPatchset:    "5",
+							kube.OrgLabel:            "same-org",
+							kube.RepoLabel:           "same-repo",
+							kube.PullLabel:           "123456",
+						},
+						Annotations: map[string]string{
+							client.GerritID:       "123-abc",
+							client.GerritInstance: "gerrit",
+						},
+						CreationTimestamp: metav1.Time{
+							Time: timeNow.Add(-time.Hour),
+						},
+					},
+					Status: v1.ProwJobStatus{
+						State: v1.FailureState,
+						URL:   "guber/foo",
+						PrevReportStates: map[string]v1.ProwJobState{
+							"gerrit-reporter": v1.FailureState,
+						},
+					},
+					Spec: v1.ProwJobSpec{
+						Refs: &v1.Refs{
+							Repo: "foo",
+						},
+						Job:  "ci-foo",
+						Type: v1.PresubmitJob,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							client.GerritRevision:    "def",
+							kube.ProwJobTypeLabel:    presubmit,
+							client.GerritReportLabel: "same-label",
+							client.GerritPatchset:    "6",
+							kube.OrgLabel:            "same-org",
+							kube.RepoLabel:           "same-repo",
+							kube.PullLabel:           "123456",
+						},
+						Annotations: map[string]string{
+							client.GerritID:       "123-def",
+							client.GerritInstance: "gerrit",
+						},
+						CreationTimestamp: metav1.Time{
+							Time: timeNow.Add(-time.Hour),
+						},
+					},
+					Status: v1.ProwJobStatus{
+						State: v1.PendingState,
+						URL:   "guber/foo",
+					},
+					Spec: v1.ProwJobSpec{
+						Refs: &v1.Refs{
+							Repo: "foo",
+						},
+						Job:  "ci-foo",
+						Type: v1.PresubmitJob,
+					},
+				},
+			},
+			expectReport: false,
+		},
+		{
+			name: "2 jobs, both failed, job from newer patchset failed, should not report",
+			pj: &v1.ProwJob{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						client.GerritRevision:    "abc",
+						kube.ProwJobTypeLabel:    presubmit,
+						client.GerritReportLabel: "same-label",
+						client.GerritPatchset:    "5",
+						kube.OrgLabel:            "same-org",
+						kube.RepoLabel:           "same-repo",
+						kube.PullLabel:           "123456",
+					},
+					Annotations: map[string]string{
+						client.GerritID:       "123-abc",
+						client.GerritInstance: "gerrit",
+					},
+					CreationTimestamp: metav1.Time{
+						Time: timeNow,
+					},
+				},
+				Status: v1.ProwJobStatus{
+					State: v1.SuccessState,
+					URL:   "guber/foo",
+				},
+				Spec: v1.ProwJobSpec{
+					Type: v1.PresubmitJob,
+					Refs: &v1.Refs{
+						Repo: "foo",
+					},
+					Job: "ci-foo",
+				},
+			},
+			existingPJs: []*v1.ProwJob{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							client.GerritRevision:    "abc",
+							kube.ProwJobTypeLabel:    presubmit,
+							client.GerritReportLabel: "same-label",
+							client.GerritPatchset:    "5",
+							kube.OrgLabel:            "same-org",
+							kube.RepoLabel:           "same-repo",
+							kube.PullLabel:           "123456",
+						},
+						Annotations: map[string]string{
+							client.GerritID:       "123-abc",
+							client.GerritInstance: "gerrit",
+						},
+						CreationTimestamp: metav1.Time{
+							Time: timeNow.Add(-time.Hour),
+						},
+					},
+					Status: v1.ProwJobStatus{
+						State: v1.FailureState,
+						URL:   "guber/bar",
+						PrevReportStates: map[string]v1.ProwJobState{
+							"gerrit-reporter": v1.FailureState,
+						},
+					},
+					Spec: v1.ProwJobSpec{
+						Refs: &v1.Refs{
+							Repo: "bar",
+						},
+						Job:  "ci-bar",
+						Type: v1.PresubmitJob,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							client.GerritRevision:    "abc",
+							kube.ProwJobTypeLabel:    presubmit,
+							client.GerritReportLabel: "same-label",
+							client.GerritPatchset:    "5",
+							kube.OrgLabel:            "same-org",
+							kube.RepoLabel:           "same-repo",
+							kube.PullLabel:           "123456",
+						},
+						Annotations: map[string]string{
+							client.GerritID:       "123-abc",
+							client.GerritInstance: "gerrit",
+						},
+						CreationTimestamp: metav1.Time{
+							Time: timeNow.Add(-time.Hour),
+						},
+					},
+					Status: v1.ProwJobStatus{
+						State: v1.FailureState,
+						URL:   "guber/foo",
+						PrevReportStates: map[string]v1.ProwJobState{
+							"gerrit-reporter": v1.FailureState,
+						},
+					},
+					Spec: v1.ProwJobSpec{
+						Refs: &v1.Refs{
+							Repo: "foo",
+						},
+						Job:  "ci-foo",
+						Type: v1.PresubmitJob,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							client.GerritRevision:    "def",
+							kube.ProwJobTypeLabel:    presubmit,
+							client.GerritReportLabel: "same-label",
+							client.GerritPatchset:    "6",
+							kube.OrgLabel:            "same-org",
+							kube.RepoLabel:           "same-repo",
+							kube.PullLabel:           "123456",
+						},
+						Annotations: map[string]string{
+							client.GerritID:       "123-def",
+							client.GerritInstance: "gerrit",
+						},
+						CreationTimestamp: metav1.Time{
+							Time: timeNow.Add(-time.Hour),
+						},
+					},
+					Status: v1.ProwJobStatus{
+						State: v1.FailureState,
+						URL:   "guber/foo",
+					},
+					Spec: v1.ProwJobSpec{
+						Refs: &v1.Refs{
+							Repo: "foo",
+						},
+						Job:  "ci-foo",
+						Type: v1.PresubmitJob,
+					},
+				},
+			},
+			expectReport: false,
+		},
 	}
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
 			fgc := &fgc{instance: "gerrit"}
-			allpj := []*v1.ProwJob{tc.pj}
-			if tc.existingPJs != nil {
-				allpj = append(allpj, tc.existingPJs...)
+			allpj := []runtime.Object{tc.pj}
+			for idx, pj := range tc.existingPJs {
+				pj.Name = strconv.Itoa(idx)
+				allpj = append(allpj, pj)
 			}
 
-			fl := &fakeLister{pjs: allpj}
-			reporter := &Client{gc: fgc, lister: fl}
+			reporter := &Client{gc: fgc, lister: fakectrlruntimeclient.NewFakeClient(allpj...)}
 
-			shouldReport := reporter.ShouldReport(tc.pj)
+			shouldReport := reporter.ShouldReport(context.Background(), logrus.NewEntry(logrus.StandardLogger()), tc.pj)
 			if shouldReport != tc.expectReport {
 				t.Errorf("shouldReport: %v, expectReport: %v", shouldReport, tc.expectReport)
 			}
@@ -1074,7 +1330,7 @@ func TestReport(t *testing.T) {
 				return
 			}
 
-			reportedJobs, err := reporter.Report(tc.pj)
+			reportedJobs, _, err := reporter.Report(context.Background(), logrus.NewEntry(logrus.StandardLogger()), tc.pj)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}

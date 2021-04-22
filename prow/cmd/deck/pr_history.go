@@ -39,7 +39,7 @@ import (
 	"k8s.io/test-infra/prow/pod-utils/downwardapi"
 )
 
-var pullCommitRe = regexp.MustCompile(`^[-\w]+:\w{40},\d+:(\w{40})$`)
+var pullCommitRe = regexp.MustCompile(`^[-\.\w]+:\w{40},\d+:(\w{40})$`)
 
 type prHistoryTemplate struct {
 	Link    string
@@ -87,12 +87,12 @@ func (a byStarted) Len() int           { return len(a) }
 func (a byStarted) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a byStarted) Less(i, j int) bool { return a[i].Started.Before(a[j].Started) }
 
-func githubPRLink(org, repo string, pr int) string {
-	return fmt.Sprintf("https://github.com/%s/%s/pull/%d", org, repo, pr)
+func githubPRLink(githubHost, org, repo string, pr int) string {
+	return fmt.Sprintf("https://%s/%s/%s/pull/%d", githubHost, org, repo, pr)
 }
 
-func githubCommitLink(org, repo, commitHash string) string {
-	return fmt.Sprintf("https://github.com/%s/%s/commit/%s", org, repo, commitHash)
+func githubCommitLink(githubHost, org, repo, commitHash string) string {
+	return fmt.Sprintf("https://%s/%s/%s/commit/%s", githubHost, org, repo, commitHash)
 }
 
 func jobHistLink(storageProvider, bucketName, jobName string) string {
@@ -164,7 +164,7 @@ func getPRBuildData(ctx context.Context, bucket storageBucket, jobs []jobBuilds)
 	return builds
 }
 
-func updateCommitData(commits map[string]*commitData, org, repo, hash string, buildTime time.Time, width int) {
+func updateCommitData(commits map[string]*commitData, githubHost, org, repo, hash string, buildTime time.Time, width int) {
 	commit, ok := commits[hash]
 	if !ok {
 		commits[hash] = &commitData{
@@ -174,7 +174,7 @@ func updateCommitData(commits map[string]*commitData, org, repo, hash string, bu
 		commit = commits[hash]
 		if len(hash) == 40 {
 			commit.HashPrefix = hash[:7]
-			commit.Link = githubCommitLink(org, repo, hash)
+			commit.Link = githubCommitLink(githubHost, org, repo, hash)
 		}
 	}
 	if buildTime.After(commit.latest) {
@@ -204,8 +204,8 @@ func parsePullURL(u *url.URL) (org, repo string, pr int, err error) {
 	return org, repo, pr, nil
 }
 
-// getGCSDirsForPR returns a map from bucket names -> set of "directories" containing presubmit data
-func getGCSDirsForPR(c *config.Config, gitHubClient deckGitHubClient, gitClient git.ClientFactory, org, repo string, prNumber int) (map[string]sets.String, error) {
+// getStorageDirsForPR returns a map from bucket names -> set of "directories" containing presubmit data
+func getStorageDirsForPR(c *config.Config, gitHubClient deckGitHubClient, gitClient git.ClientFactory, org, repo string, prNumber int) (map[string]sets.String, error) {
 	toSearch := make(map[string]sets.String)
 	fullRepo := org + "/" + repo
 
@@ -227,7 +227,11 @@ func getGCSDirsForPR(c *config.Config, gitHubClient deckGitHubClient, gitClient 
 			gcsConfig = presubmit.DecorationConfig.GCSConfiguration
 		} else {
 			// for undecorated jobs assume the default
-			gcsConfig = c.Plank.GetDefaultDecorationConfigs(fullRepo).GCSConfiguration
+			def := c.Plank.GuessDefaultDecorationConfig(fullRepo, presubmit.Cluster)
+			if def == nil || def.GCSConfiguration == nil {
+				return toSearch, fmt.Errorf("failed to guess gcs config based on default decoration config: %w", err)
+			}
+			gcsConfig = def.GCSConfiguration
 		}
 
 		gcsPath, _, _ := gcsupload.PathsForJob(gcsConfig, &downwardapi.JobSpec{
@@ -256,7 +260,7 @@ func getGCSDirsForPR(c *config.Config, gitHubClient deckGitHubClient, gitClient 
 	return toSearch, nil
 }
 
-func getPRHistory(ctx context.Context, prHistoryURL *url.URL, config *config.Config, opener io.Opener, gitHubClient deckGitHubClient, gitClient git.ClientFactory) (prHistoryTemplate, error) {
+func getPRHistory(ctx context.Context, prHistoryURL *url.URL, config *config.Config, opener io.Opener, gitHubClient deckGitHubClient, gitClient git.ClientFactory, githubHost string) (prHistoryTemplate, error) {
 	start := time.Now()
 	template := prHistoryTemplate{}
 
@@ -265,27 +269,30 @@ func getPRHistory(ctx context.Context, prHistoryURL *url.URL, config *config.Con
 		return template, fmt.Errorf("failed to parse URL %s: %v", prHistoryURL.String(), err)
 	}
 	template.Name = fmt.Sprintf("%s/%s #%d", org, repo, pr)
-	template.Link = githubPRLink(org, repo, pr) // TODO(ibzib) support Gerrit :/
+	template.Link = githubPRLink(githubHost, org, repo, pr) // TODO(ibzib) support Gerrit :/
 
-	toSearch, err := getGCSDirsForPR(config, gitHubClient, gitClient, org, repo, pr)
+	toSearch, err := getStorageDirsForPR(config, gitHubClient, gitClient, org, repo, pr)
 	if err != nil {
-		return template, fmt.Errorf("failed to list GCS directories for PR %s: %v", template.Name, err)
+		return template, fmt.Errorf("failed to list directories for PR %s: %v", template.Name, err)
 	}
 
 	builds := []buildData{}
 	// job name -> commit hash -> list of builds
 	jobCommitBuilds := make(map[string]map[string][]buildData)
 
-	for bucket, gcsPaths := range toSearch {
+	for bucket, storagePaths := range toSearch {
 		parsedBucket, err := url.Parse(bucket)
 		if err != nil {
 			return template, fmt.Errorf("parse bucket %s: %w", bucket, err)
 		}
 		bucketName := parsedBucket.Host
 		storageProvider := parsedBucket.Scheme
-		bucket := gcsBucket{bucketName, storageProvider, opener}
-		for gcsPath := range gcsPaths {
-			jobPrefixes, err := bucket.listSubDirs(ctx, gcsPath)
+		bucket, err := newBlobStorageBucket(bucketName, storageProvider, config, opener)
+		if err != nil {
+			return template, err
+		}
+		for storagePath := range storagePaths {
+			jobPrefixes, err := bucket.listSubDirs(ctx, storagePath)
 			if err != nil {
 				return template, fmt.Errorf("failed to get job names: %v", err)
 			}
@@ -309,7 +316,7 @@ func getPRHistory(ctx context.Context, prHistoryURL *url.URL, config *config.Con
 		jobName := build.jobName
 		hash := build.commitHash
 		jobCommitBuilds[jobName][hash] = append(jobCommitBuilds[jobName][hash], build)
-		updateCommitData(commits, org, repo, hash, build.Started, len(jobCommitBuilds[jobName][hash]))
+		updateCommitData(commits, githubHost, org, repo, hash, build.Started, len(jobCommitBuilds[jobName][hash]))
 	}
 	for _, commit := range commits {
 		template.Commits = append(template.Commits, *commit)
@@ -328,7 +335,7 @@ func getPRHistory(ctx context.Context, prHistoryURL *url.URL, config *config.Con
 		}
 	}
 
-	elapsed := time.Now().Sub(start)
+	elapsed := time.Since(start)
 	logrus.WithField("duration", elapsed.String()).Infof("loaded %s", prHistoryURL.Path)
 
 	return template, nil

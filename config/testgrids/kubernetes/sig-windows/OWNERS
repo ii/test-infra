@@ -1,0 +1,21 @@
+reviewers:
+- benmoss
+- chewong
+- ddebroy
+- jeremyje
+- marosset
+- michmike
+- PatrickLang
+- pjh
+approvers:
+- benmoss
+- chewong
+- ddebroy
+- jeremyje
+- marosset
+- michmike
+- PatrickLang
+- pjh
+
+labels:
+- sig/windows

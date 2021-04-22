@@ -2,17 +2,19 @@
 
 approvers:
 - andyzhangx
-- awesomenix
 - brendandburns
 - CecileRobertMichon
 - feiskyer
+- devigned
 - justaugustus
 - karataliu
 - khenidak
+- nader-ziada
 reviewers:
+- alexeldeib
+- cpanato
 - juan-lee
-- serbrech
-- vincepri
+- shysank
 
 labels:
 - sig/cluster-lifecycle

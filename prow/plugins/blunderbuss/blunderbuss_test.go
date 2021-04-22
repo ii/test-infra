@@ -34,7 +34,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
+	"k8s.io/test-infra/prow/pkg/layeredsets"
 	"k8s.io/test-infra/prow/plugins"
+	"k8s.io/test-infra/prow/plugins/ownersconfig"
 	"k8s.io/test-infra/prow/repoowners"
 )
 
@@ -105,15 +107,19 @@ func (froc fakeRepoownersClient) LoadRepoOwners(org, repo, base string) (repoown
 
 type fakeOwnersClient struct {
 	owners            map[string]string
-	approvers         map[string]sets.String
+	approvers         map[string]layeredsets.String
 	leafApprovers     map[string]sets.String
-	reviewers         map[string]sets.String
+	reviewers         map[string]layeredsets.String
 	requiredReviewers map[string]sets.String
 	leafReviewers     map[string]sets.String
-	dirBlacklist      []*regexp.Regexp
+	dirDenylist       []*regexp.Regexp
 }
 
-func (foc *fakeOwnersClient) Approvers(path string) sets.String {
+func (foc *fakeOwnersClient) Filenames() ownersconfig.Filenames {
+	return ownersconfig.FakeFilenames
+}
+
+func (foc *fakeOwnersClient) Approvers(path string) layeredsets.String {
 	return foc.approvers[path]
 }
 
@@ -125,7 +131,7 @@ func (foc *fakeOwnersClient) FindApproverOwnersForFile(path string) string {
 	return foc.owners[path]
 }
 
-func (foc *fakeOwnersClient) Reviewers(path string) sets.String {
+func (foc *fakeOwnersClient) Reviewers(path string) layeredsets.String {
 	return foc.reviewers[path]
 }
 
@@ -149,9 +155,13 @@ func (foc *fakeOwnersClient) IsNoParentOwners(path string) bool {
 	return false
 }
 
+func (foc *fakeOwnersClient) IsAutoApproveUnownedSubfolders(path string) bool {
+	return false
+}
+
 func (foc *fakeOwnersClient) ParseSimpleConfig(path string) (repoowners.SimpleConfig, error) {
 	dir := filepath.Dir(path)
-	for _, re := range foc.dirBlacklist {
+	for _, re := range foc.dirDenylist {
 		if re.MatchString(dir) {
 			return repoowners.SimpleConfig{}, filepath.SkipDir
 		}
@@ -168,7 +178,7 @@ func (foc *fakeOwnersClient) ParseSimpleConfig(path string) (repoowners.SimpleCo
 
 func (foc *fakeOwnersClient) ParseFullConfig(path string) (repoowners.FullConfig, error) {
 	dir := filepath.Dir(path)
-	for _, re := range foc.dirBlacklist {
+	for _, re := range foc.dirDenylist {
 		if re.MatchString(dir) {
 			return repoowners.FullConfig{}, filepath.SkipDir
 		}
@@ -197,14 +207,14 @@ var (
 		"e.go":  "5",
 		"ee.go": "5",
 	}
-	reviewers = map[string]sets.String{
-		"a.go": sets.NewString("al"),
-		"b.go": sets.NewString("al"),
-		"c.go": sets.NewString("charles"),
+	reviewers = map[string]layeredsets.String{
+		"a.go": layeredsets.NewString("al"),
+		"b.go": layeredsets.NewString("al"),
+		"c.go": layeredsets.NewStringFromSlices([]string{"charles"}, []string{"ben"}), // ben is top level, charles is lower
 
-		"e.go":  sets.NewString("erick", "evan"),
-		"ee.go": sets.NewString("erick", "evan"),
-		"f.go":  sets.NewString("author", "non-author"),
+		"e.go":  layeredsets.NewString("erick", "evan"),
+		"ee.go": layeredsets.NewString("erick", "evan"),
+		"f.go":  layeredsets.NewString("author", "non-author"),
 	}
 	requiredReviewers = map[string]sets.String{
 		"a.go": sets.NewString("ben"),
@@ -230,16 +240,22 @@ var (
 		alternateExpectedRequested []string
 	}{
 		{
-			name:              "one file, 3 leaf reviewers, 1 parent, request 3",
+			name:              "one file, 3 leaf reviewers, 1 parent reviewer, 1 top level reviewer, request 3",
 			filesChanged:      []string{"c.go"},
 			reviewerCount:     3,
 			expectedRequested: []string{"cole", "carl", "chad"},
 		},
 		{
-			name:              "one file, 3 leaf reviewers, 1 parent reviewer, request 4",
+			name:              "one file, 3 leaf reviewers, 1 parent reviewer, 1 top level reviewer, request 4",
 			filesChanged:      []string{"c.go"},
 			reviewerCount:     4,
 			expectedRequested: []string{"cole", "carl", "chad", "charles"},
+		},
+		{
+			name:              "one file, 3 leaf reviewers, 1 parent reviewer, 1 top level reviewer, request 5",
+			filesChanged:      []string{"c.go"},
+			reviewerCount:     5,
+			expectedRequested: []string{"cole", "carl", "chad", "charles", "ben"}, // last resort we take the top level reviewer
 		},
 		{
 			name:              "two files, 2 leaf reviewers, 1 common parent, request 2",
@@ -396,14 +412,18 @@ func TestHandleWithoutExcludeApproversMixed(t *testing.T) {
 
 				"e.go":  "5",
 				"ee.go": "5",
+				"f.go":  "6",
+				"g.go":  "7",
 			},
-			approvers: map[string]sets.String{
-				"a.go": sets.NewString("al"),
-				"b.go": sets.NewString("jeff"),
-				"c.go": sets.NewString("jeff"),
+			approvers: map[string]layeredsets.String{
+				"a.go": layeredsets.NewString("al"),
+				"b.go": layeredsets.NewString("jeff"),
+				"c.go": layeredsets.NewString("jeff"),
 
-				"e.go":  sets.NewString(),
-				"ee.go": sets.NewString("larry"),
+				"e.go":  layeredsets.NewString(),
+				"ee.go": layeredsets.NewString("larry"),
+				"f.go":  layeredsets.NewString("approver1"),
+				"g.go":  layeredsets.NewString("Approver1"),
 			},
 			leafApprovers: map[string]sets.String{
 				"a.go": sets.NewString("alice"),
@@ -412,14 +432,16 @@ func TestHandleWithoutExcludeApproversMixed(t *testing.T) {
 
 				"e.go":  sets.NewString("erick", "evan"),
 				"ee.go": sets.NewString("erick", "evan"),
+				"f.go":  sets.NewString("leafApprover1", "leafApprover2"),
+				"g.go":  sets.NewString("leafApprover1", "leafApprover2"),
 			},
-			reviewers: map[string]sets.String{
-				"a.go": sets.NewString("al"),
-				"b.go": sets.NewString(),
-				"c.go": sets.NewString("charles"),
+			reviewers: map[string]layeredsets.String{
+				"a.go": layeredsets.NewString("al"),
+				"b.go": layeredsets.NewString(),
+				"c.go": layeredsets.NewString("charles"),
 
-				"e.go":  sets.NewString("erick", "evan"),
-				"ee.go": sets.NewString("erick", "evan"),
+				"e.go":  layeredsets.NewString("erick", "evan"),
+				"ee.go": layeredsets.NewString("erick", "evan"),
 			},
 			leafReviewers: map[string]sets.String{
 				"a.go":  sets.NewString("alice"),
@@ -476,6 +498,20 @@ func TestHandleWithoutExcludeApproversMixed(t *testing.T) {
 			filesChanged:      []string{"e.go", "ee.go"},
 			reviewerCount:     4,
 			expectedRequested: []string{"erick", "ellen", "evan", "larry"},
+		},
+		{
+			name:              "1 file, 2 leaf approvers, 1 approver, request 3, max 2",
+			filesChanged:      []string{"f.go"},
+			reviewerCount:     3,
+			maxReviewerCount:  2,
+			expectedRequested: []string{"leafApprover1", "leafApprover2"},
+		},
+		{
+			name:              "1 file, 2 leaf approvers, 1 approver (capitalized), request 3, max 2",
+			filesChanged:      []string{"g.go"},
+			reviewerCount:     3,
+			maxReviewerCount:  2,
+			expectedRequested: []string{"leafApprover1", "leafApprover2"},
 		},
 	}
 	for _, tc := range testcases {
@@ -733,20 +769,20 @@ func TestPopActiveReviewer(t *testing.T) {
 				"bb.go": "3",
 				"c.go":  "4",
 			},
-			approvers: map[string]sets.String{
-				"a.go": sets.NewString("alice"),
-				"b.go": sets.NewString("brad"),
-				"c.go": sets.NewString("busy-user"),
+			approvers: map[string]layeredsets.String{
+				"a.go": layeredsets.NewString("alice"),
+				"b.go": layeredsets.NewString("brad"),
+				"c.go": layeredsets.NewString("busy-user"),
 			},
 			leafApprovers: map[string]sets.String{
 				"a.go": sets.NewString("alice"),
 				"b.go": sets.NewString("brad"),
 				"c.go": sets.NewString("busy-user"),
 			},
-			reviewers: map[string]sets.String{
-				"a.go": sets.NewString("alice"),
-				"b.go": sets.NewString("brad"),
-				"c.go": sets.NewString("busy-user"),
+			reviewers: map[string]layeredsets.String{
+				"a.go": layeredsets.NewString("alice"),
+				"b.go": layeredsets.NewString("brad"),
+				"c.go": layeredsets.NewString("busy-user"),
 			},
 			leafReviewers: map[string]sets.String{
 				"a.go": sets.NewString("alice"),

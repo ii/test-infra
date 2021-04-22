@@ -32,7 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/testgrid/metadata"
 
-	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
+	prowv1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/deck/jobs"
 	pkgio "k8s.io/test-infra/prow/io"
@@ -61,7 +61,7 @@ type Spyglass struct {
 	config   config.Getter
 	testgrid *TestGrid
 
-	*GCSArtifactFetcher
+	*StorageArtifactFetcher
 	*PodLogArtifactFetcher
 }
 
@@ -82,10 +82,10 @@ type ExtraLink struct {
 // New constructs a Spyglass object from a JobAgent, a config.Agent, and a storage Client.
 func New(ctx context.Context, ja *jobs.JobAgent, cfg config.Getter, opener pkgio.Opener, useCookieAuth bool) *Spyglass {
 	return &Spyglass{
-		JobAgent:              ja,
-		config:                cfg,
-		PodLogArtifactFetcher: NewPodLogArtifactFetcher(ja),
-		GCSArtifactFetcher:    NewGCSArtifactFetcher(opener, useCookieAuth),
+		JobAgent:               ja,
+		config:                 cfg,
+		PodLogArtifactFetcher:  NewPodLogArtifactFetcher(ja),
+		StorageArtifactFetcher: NewStorageArtifactFetcher(opener, cfg, useCookieAuth),
 		testgrid: &TestGrid{
 			conf:   cfg,
 			opener: opener,
@@ -111,9 +111,9 @@ func (sg *Spyglass) Lenses(lensConfigIndexes []int) (orderedIndexes []int, lensM
 	var ls []ld
 	for _, lensIndex := range lensConfigIndexes {
 		lfc := sg.config().Deck.Spyglass.Lenses[lensIndex]
-		lens, err := lenses.GetLens(lfc.Lens.Name)
+		lens, err := getLensConfig(lfc)
 		if err != nil {
-			logrus.WithField("lensName", lens).WithError(err).Error("Could not find artifact lens")
+			logrus.WithField("lensName", lfc.Lens.Name).WithError(err).Error("Could not find artifact lens")
 		} else {
 			ls = append(ls, ld{lens, lensIndex})
 		}
@@ -139,6 +139,39 @@ func (sg *Spyglass) Lenses(lensConfigIndexes []int) (orderedIndexes []int, lensM
 	}
 
 	return orderedIndexes, lensMap
+}
+
+type lensConfigWrapper struct {
+	lensConfig lenses.LensConfig
+}
+
+func (l lensConfigWrapper) Config() lenses.LensConfig {
+	return l.lensConfig
+}
+
+func getLensConfig(lensFileConfig config.LensFileConfig) (LensConfig, error) {
+	lens, err := lenses.GetLens(lensFileConfig.Lens.Name)
+	if err != nil && err != lenses.ErrInvalidLensName {
+		return nil, err
+	}
+	if err == nil {
+		return lens, nil
+	}
+	// we couldn't find a local lens (err==lenses.ErrInvalidLensName) so let's search for a remote lens
+	if lensFileConfig.RemoteConfig != nil {
+		lc := lenses.LensConfig{
+			Name:  lensFileConfig.Lens.Name,
+			Title: lensFileConfig.RemoteConfig.Title,
+		}
+		if lensFileConfig.RemoteConfig.Priority != nil {
+			lc.Priority = *lensFileConfig.RemoteConfig.Priority
+		}
+		if lensFileConfig.RemoteConfig.HideTitle != nil {
+			lc.HideTitle = *lensFileConfig.RemoteConfig.HideTitle
+		}
+		return lensConfigWrapper{lc}, nil
+	}
+	return nil, fmt.Errorf("could not find lens")
 }
 
 func (sg *Spyglass) ResolveSymlink(src string) (string, error) {
@@ -178,7 +211,7 @@ func (sg *Spyglass) ResolveSymlink(src string) (string, error) {
 	}
 }
 
-// JobPath returns a link to the GCS directory for the job specified in src
+// JobPath returns a link to the directory for the job specified in src
 func (sg *Spyglass) JobPath(src string) (string, error) {
 	src = strings.TrimSuffix(src, "/")
 	keyType, key, err := splitSrc(src)
@@ -211,7 +244,7 @@ func (sg *Spyglass) JobPath(src string) (string, error) {
 			// fallback to gs/ if bucket name is given without storage type
 			bktName = fmt.Sprintf("%s/%s", providers.GS, bktName)
 		}
-		if job.Spec.Type == prowapi.PresubmitJob {
+		if job.Spec.Type == prowv1.PresubmitJob {
 			return path.Join(bktName, gcs.PRLogs, "directory", jobName), nil
 		}
 		return path.Join(bktName, gcs.NonPRLogs, jobName), nil
@@ -270,7 +303,7 @@ func (sg *Spyglass) ProwJobName(src string) (string, error) {
 	return job.Name, nil
 }
 
-// RunPath returns the path to the GCS directory for the job run specified in src.
+// RunPath returns the path to the directory for the job run specified in src.
 func (sg *Spyglass) RunPath(src string) (string, error) {
 	src = strings.TrimSuffix(src, "/")
 	keyType, key, err := splitSrc(src)
@@ -339,10 +372,11 @@ func (sg *Spyglass) RunToPR(src string) (string, string, int, error) {
 			// per job would probably be a bad idea (indeed, not even the tests try to do this).
 			// This decision should probably be revisited if we ever want other information from it.
 			// TODO (droslean): we should get the default decoration config depending on the org/repo.
-			if sg.config().Plank.DefaultDecorationConfigs["*"] == nil || sg.config().Plank.DefaultDecorationConfigs["*"].GCSConfiguration == nil {
+			ddc := sg.config().Plank.GuessDefaultDecorationConfig("", "")
+			if ddc == nil || ddc.GCSConfiguration == nil {
 				return "", "", 0, fmt.Errorf("couldn't look up a GCS configuration")
 			}
-			c := sg.config().Plank.DefaultDecorationConfigs["*"].GCSConfiguration
+			c := ddc.GCSConfiguration
 			// Assumption: we can derive the type of URL from how many components it has, without worrying much about
 			// what the actual path configuration is.
 			switch len(split) {
@@ -369,10 +403,15 @@ func (sg *Spyglass) RunToPR(src string) (string, string, int, error) {
 
 // ExtraLinks fetches started.json and extracts links from metadata.links.
 func (sg *Spyglass) ExtraLinks(ctx context.Context, src string) ([]ExtraLink, error) {
-	artifacts, err := sg.FetchArtifacts(ctx, src, "", 1000000, []string{"started.json"})
+	artifacts, err := sg.FetchArtifacts(ctx, src, "", 1000000, []string{prowv1.StartedStatusFile})
+	// Failing to parse src, that's an error.
+	if err != nil {
+		return nil, err
+	}
+
 	// Failing to find started.json is okay, just return nothing quietly.
-	if err != nil || len(artifacts) == 0 {
-		logrus.WithError(err).Debugf("Failed to find started.json while looking for extra links.")
+	if len(artifacts) == 0 {
+		logrus.Debugf("Failed to find started.json while looking for extra links.")
 		return nil, nil
 	}
 	// Failing to read an artifact we already know to exist shouldn't happen, so that's an error.

@@ -19,13 +19,16 @@ package github
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -34,11 +37,13 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/shurcooL/githubv4"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/diff"
 
 	"k8s.io/test-infra/ghproxy/ghcache"
+	"k8s.io/test-infra/prow/version"
 )
 
 type testTime struct {
@@ -64,6 +69,7 @@ func getClient(url string) *client {
 		logger: logrus.NewEntry(logger),
 		delegate: &delegate{
 			time:     &testTime{},
+			throttle: throttler{throttlerDelegate: &throttlerDelegate{}},
 			getToken: getToken,
 			censor: func(content []byte) []byte {
 				return content
@@ -94,7 +100,7 @@ func TestRequestRateLimit(t *testing.T) {
 	defer ts.Close()
 	c := getClient(ts.URL)
 	c.time = tc
-	resp, err := c.requestRetry(http.MethodGet, "/", "", nil)
+	resp, err := c.requestRetry(http.MethodGet, "/", "", "", nil)
 	if err != nil {
 		t.Errorf("Error from request: %v", err)
 	} else if resp.StatusCode != 200 {
@@ -115,7 +121,7 @@ func TestAbuseRateLimit(t *testing.T) {
 	defer ts.Close()
 	c := getClient(ts.URL)
 	c.time = tc
-	resp, err := c.requestRetry(http.MethodGet, "/", "", nil)
+	resp, err := c.requestRetry(http.MethodGet, "/", "", "", nil)
 	if err != nil {
 		t.Errorf("Error from request: %v", err)
 	} else if resp.StatusCode != 200 {
@@ -135,11 +141,72 @@ func TestRetry404(t *testing.T) {
 	defer ts.Close()
 	c := getClient(ts.URL)
 	c.time = tc
-	resp, err := c.requestRetry(http.MethodGet, "/", "", nil)
+	resp, err := c.requestRetry(http.MethodGet, "/", "", "", nil)
 	if err != nil {
 		t.Errorf("Error from request: %v", err)
 	} else if resp.StatusCode != 200 {
 		t.Errorf("Expected status code 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestIncorrectOAuthScopes(t *testing.T) {
+	testCases := []struct {
+		name                string
+		acceptedOAuthScopes string
+		oauthScopes         string
+		expectedErr         string
+	}{
+		{
+			name:                "no overlapping OAuth scopes",
+			acceptedOAuthScopes: "admin:org,repo",
+			oauthScopes:         "admin:repo_hook,workflow",
+			expectedErr:         "the account is using admin:repo_hook,workflow oauth scopes, please make sure you are using at least one of the following oauth scopes: admin:org,repo",
+		},
+		{
+			name:                "empty OAuth scopes",
+			acceptedOAuthScopes: "admin:org,repo",
+			oauthScopes:         "",
+			expectedErr:         "the account is using no oauth scopes, please make sure you are using at least one of the following oauth scopes: admin:org,repo",
+		},
+		{
+			name:                "empty accepted OAuth scopes",
+			acceptedOAuthScopes: "",
+			oauthScopes:         "",
+			expectedErr:         "the GitHub API request returns a 403 error: 403 Forbidden\n",
+		},
+	}
+	for _, tc := range testCases {
+		tt := &testTime{now: time.Now()}
+		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Accepted-OAuth-Scopes", tc.acceptedOAuthScopes)
+			w.Header().Set("X-OAuth-Scopes", tc.oauthScopes)
+			http.Error(w, "403 Forbidden", http.StatusForbidden)
+		}))
+		defer ts.Close()
+		c := getClient(ts.URL)
+		c.time = tt
+		_, err := c.requestRetry(http.MethodGet, "/", "", "", nil)
+		if err == nil {
+			t.Error("Expected an error from a request with incorrect OAuth scopes, but succeeded!?")
+		} else if diff := cmp.Diff(err.Error(), tc.expectedErr); diff != "" {
+			t.Errorf("Unexpected error message: %s", diff)
+		}
+	}
+}
+
+func TestUnparsable403Error(t *testing.T) {
+	tt := &testTime{now: time.Now()}
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Accepted-OAuth-Scopes", "admin:org,repo")
+		w.Header().Set("X-OAuth-Scopes", "repo")
+		http.Error(w, "403 Forbidden", http.StatusForbidden)
+	}))
+	defer ts.Close()
+	c := getClient(ts.URL)
+	c.time = tt
+	_, err := c.requestRetry(http.MethodGet, "/", "", "", nil)
+	if err == nil {
+		t.Error("Expected an error from a request that can cause a 403 error, but succeeded!?")
 	}
 }
 
@@ -150,7 +217,7 @@ func TestRetryBase(t *testing.T) {
 	c.initialDelay = time.Microsecond
 	// One good endpoint:
 	c.bases = []string{c.bases[0]}
-	resp, err := c.requestRetry(http.MethodGet, "/", "", nil)
+	resp, err := c.requestRetry(http.MethodGet, "/", "", "", nil)
 	if err != nil {
 		t.Errorf("Error from request: %v", err)
 	} else if resp.StatusCode != 200 {
@@ -158,7 +225,7 @@ func TestRetryBase(t *testing.T) {
 	}
 	// Bad endpoint followed by good endpoint:
 	c.bases = []string{"not-a-valid-base", c.bases[0]}
-	resp, err = c.requestRetry(http.MethodGet, "/", "", nil)
+	resp, err = c.requestRetry(http.MethodGet, "/", "", "", nil)
 	if err != nil {
 		t.Errorf("Error from request: %v", err)
 	} else if resp.StatusCode != 200 {
@@ -166,35 +233,9 @@ func TestRetryBase(t *testing.T) {
 	}
 	// One bad endpoint:
 	c.bases = []string{"not-a-valid-base"}
-	resp, err = c.requestRetry(http.MethodGet, "/", "", nil)
+	_, err = c.requestRetry(http.MethodGet, "/", "", "", nil)
 	if err == nil {
 		t.Error("Expected an error from a request to an invalid base, but succeeded!?")
-	}
-}
-
-func TestBotName(t *testing.T) {
-	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("Bad method: %s", r.Method)
-		}
-		if r.URL.Path != "/user" {
-			t.Errorf("Bad request path: %s", r.URL.Path)
-		}
-		fmt.Fprint(w, "{\"login\": \"wowza\"}")
-	}))
-	c := getClient(ts.URL)
-	botName, err := c.BotName()
-	if err != nil {
-		t.Errorf("Didn't expect error: %v", err)
-	} else if botName != "wowza" {
-		t.Errorf("Wrong bot name. Got %s, expected wowza.", botName)
-	}
-	ts.Close()
-	botName, err = c.BotName()
-	if err != nil {
-		t.Errorf("Didn't expect error: %v", err)
-	} else if botName != "wowza" {
-		t.Errorf("Wrong bot name. Got %s, expected wowza.", botName)
 	}
 }
 
@@ -368,22 +409,106 @@ func TestGetPullRequestChanges(t *testing.T) {
 }
 
 func TestGetRef(t *testing.T) {
-	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("Bad method: %s", r.Method)
-		}
-		if r.URL.Path != "/repos/k8s/kuber/git/refs/heads/mastah" {
-			t.Errorf("Bad request path: %s", r.URL.Path)
-		}
-		fmt.Fprint(w, `{"object": {"sha":"abcde"}}`)
-	}))
-	defer ts.Close()
-	c := getClient(ts.URL)
-	SHA, err := c.GetRef("k8s", "kuber", "heads/mastah")
-	if err != nil {
-		t.Errorf("Didn't expect error: %v", err)
-	} else if SHA != "abcde" {
-		t.Errorf("Wrong SHA: %s", SHA)
+	testCases := []struct {
+		name              string
+		githubResponse    []byte
+		expectedSHA       string
+		expectedError     string
+		expectedErrorType error
+	}{
+		{
+			name:           "single ref",
+			githubResponse: []byte(`{"object": {"sha":"abcde"}}`),
+			expectedSHA:    "abcde",
+		},
+		{
+			name: "multiple refs, no match",
+			githubResponse: []byte(`
+[
+  {
+    "ref": "refs/heads/feature-a",
+    "node_id": "MDM6UmVmcmVmcy9oZWFkcy9mZWF0dXJlLWE=",
+    "url": "https://api.github.com/repos/octocat/Hello-World/git/refs/heads/feature-a",
+    "object": {
+      "type": "commit",
+      "sha": "aa218f56b14c9653891f9e74264a383fa43fefbd",
+      "url": "https://api.github.com/repos/octocat/Hello-World/git/commits/aa218f56b14c9653891f9e74264a383fa43fefbd"
+    }
+  },
+  {
+    "ref": "refs/heads/feature-b",
+    "node_id": "MDM6UmVmcmVmcy9oZWFkcy9mZWF0dXJlLWI=",
+    "url": "https://api.github.com/repos/octocat/Hello-World/git/refs/heads/feature-b",
+    "object": {
+      "type": "commit",
+      "sha": "612077ae6dffb4d2fbd8ce0cccaa58893b07b5ac",
+      "url": "https://api.github.com/repos/octocat/Hello-World/git/commits/612077ae6dffb4d2fbd8ce0cccaa58893b07b5ac"
+    }
+  }
+]`),
+			expectedError:     "query for org/repo ref \"heads/branch\" didn't match one but multiple refs: [refs/heads/feature-a refs/heads/feature-b]",
+			expectedErrorType: GetRefTooManyResultsError{},
+		},
+		{
+			name: "multiple refs with match",
+			githubResponse: []byte(`
+[
+  {
+    "ref": "refs/heads/branch",
+    "node_id": "MDM6UmVmcmVmcy9oZWFkcy9mZWF0dXJlLWE=",
+    "url": "https://api.github.com/repos/octocat/Hello-World/git/refs/heads/feature-a",
+    "object": {
+      "type": "commit",
+      "sha": "aa218f56b14c9653891f9e74264a383fa43fefbd",
+      "url": "https://api.github.com/repos/octocat/Hello-World/git/commits/aa218f56b14c9653891f9e74264a383fa43fefbd"
+    }
+  },
+  {
+    "ref": "refs/heads/feature-b",
+    "node_id": "MDM6UmVmcmVmcy9oZWFkcy9mZWF0dXJlLWI=",
+    "url": "https://api.github.com/repos/octocat/Hello-World/git/refs/heads/feature-b",
+    "object": {
+      "type": "commit",
+      "sha": "612077ae6dffb4d2fbd8ce0cccaa58893b07b5ac",
+      "url": "https://api.github.com/repos/octocat/Hello-World/git/commits/612077ae6dffb4d2fbd8ce0cccaa58893b07b5ac"
+    }
+  }
+]`),
+			expectedSHA: "aa218f56b14c9653891f9e74264a383fa43fefbd",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(200)
+				if r.Method != http.MethodGet {
+					t.Errorf("Bad method: %s", r.Method)
+				}
+				expectedPath := "/repos/org/repo/git/refs/heads/branch"
+				if r.URL.Path != expectedPath {
+					t.Errorf("expected path %s, got path %s", expectedPath, r.URL.Path)
+				}
+				w.Write(tc.githubResponse)
+			}))
+			defer ts.Close()
+
+			c := getClient(ts.URL)
+			var errMsg string
+			sha, err := c.GetRef("org", "repo", "heads/branch")
+			if err != nil {
+				errMsg = err.Error()
+			}
+			if errMsg != tc.expectedError {
+				t.Fatalf("expected error %q, got error %q", tc.expectedError, err)
+			}
+			if !errors.Is(err, tc.expectedErrorType) {
+				t.Errorf("expected error of type %T, got %T", tc.expectedErrorType, err)
+			}
+			if sha != tc.expectedSHA {
+				t.Errorf("expected sha %q, got sha %q", tc.expectedSHA, sha)
+			}
+		})
 	}
 }
 
@@ -401,6 +526,201 @@ func TestDeleteRef(t *testing.T) {
 	c := getClient(ts.URL)
 	if err := c.DeleteRef("k8s", "kuber", "heads/my-feature"); err != nil {
 		t.Errorf("Didn't expect error: %v", err)
+	}
+}
+
+func TestListFileCommits(t *testing.T) {
+	githubResponse := []byte(`
+[
+  {
+    "sha": "5833e02133690c6d608f66ef369e85865ede51de",
+    "node_id": "MDY6Q29tbWl0Mjk2ODI0MjU5OjU4MzNlMDIxMzM2OTBjNmQ2MDhmNjZlZjM2OWU4NTg2NWVkZTUxZGU=",
+    "commit": {
+      "author": {
+        "name": "Rustin Liu",
+        "email": "rustin.liu@gmail.com",
+        "date": "2021-01-17T15:29:04Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2021-01-17T15:29:04Z"
+      },
+      "message": "chore: update README.md (#281)\n\n* chore: update README.md\r\n\r\n* chore: update README.md",
+      "tree": {
+        "sha": "0cbce1df534461fb686a4d97f7e1549657f45594",
+        "url": "https://api.github.com/repos/ti-community-infra/tichi/git/trees/0cbce1df534461fb686a4d97f7e1549657f45594"
+      },
+      "url": "https://api.github.com/repos/ti-community-infra/tichi/git/commits/5833e02133690c6d608f66ef369e85865ede51de",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsBcBAABCAAQBQJgBFfACRBK7hj4Ov3rIwAAdHIIAAdRO4WoBZPAcLREqPuSPX+h\nM1CpnIyytSoF8QesyCffLkCWbFwswMhPLM4aXW55EeSZKeEZyghb0Ehz0ZN1b3Zx\nJzFaHeydih2S5rTFk6MCn8ZY1oSZuA3spauqEJ8RxAoaHSmZ+Zq5ykQ9qar4rLto\n3LgpMkr+z137cTfeJ5iUQZPih8AsTS3/YAmUtPLMOanNKLtMDfD1xVj4luOqXz6X\nV0UFwQs/F+4HDvVAnwmh3soMxrKZ+ZOcSAGZYP6EjR75gaUy4EmRNUkVQxxNbJ11\nY4LV0j7ShFsRPQrSfBByhKL0Ug7uAiHGLGYCxW1wkULg4hArklS0YFFfuvZwhws=\n=ujFx\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree 0cbce1df534461fb686a4d97f7e1549657f45594\nparent 9e00ae5d353eb520b58a7440757f9d715572009f\nauthor Rustin Liu <rustin.liu@gmail.com> 1610897344 +0800\ncommitter GitHub <noreply@github.com> 1610897344 +0800\n\nchore: update README.md (#281)\n\n* chore: update README.md\r\n\r\n* chore: update README.md"
+      }
+    },
+    "url": "https://api.github.com/repos/ti-community-infra/tichi/commits/5833e02133690c6d608f66ef369e85865ede51de",
+    "html_url": "https://github.com/ti-community-infra/tichi/commit/5833e02133690c6d608f66ef369e85865ede51de",
+    "comments_url": "https://api.github.com/repos/ti-community-infra/tichi/commits/5833e02133690c6d608f66ef369e85865ede51de/comments",
+    "author": {
+      "login": "hi-rustin",
+      "id": 29879298,
+      "node_id": "MDQ6VXNlcjI5ODc5Mjk4",
+      "avatar_url": "https://avatars.githubusercontent.com/u/29879298?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/hi-rustin",
+      "html_url": "https://github.com/hi-rustin",
+      "followers_url": "https://api.github.com/users/hi-rustin/followers",
+      "following_url": "https://api.github.com/users/hi-rustin/following{/other_user}",
+      "gists_url": "https://api.github.com/users/hi-rustin/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/hi-rustin/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/hi-rustin/subscriptions",
+      "organizations_url": "https://api.github.com/users/hi-rustin/orgs",
+      "repos_url": "https://api.github.com/users/hi-rustin/repos",
+      "events_url": "https://api.github.com/users/hi-rustin/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/hi-rustin/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "9e00ae5d353eb520b58a7440757f9d715572009f",
+        "url": "https://api.github.com/repos/ti-community-infra/tichi/commits/9e00ae5d353eb520b58a7440757f9d715572009f",
+        "html_url": "https://github.com/ti-community-infra/tichi/commit/9e00ae5d353eb520b58a7440757f9d715572009f"
+      }
+    ]
+  },
+  {
+    "sha": "68af84c32436c16564e1ac3c6ac36090d5d0baee",
+    "node_id": "MDY6Q29tbWl0Mjk2ODI0MjU5OjY4YWY4NGMzMjQzNmMxNjU2NGUxYWMzYzZhYzM2MDkwZDVkMGJhZWU=",
+    "commit": {
+      "author": {
+        "name": "Rustin Liu",
+        "email": "rustin.liu@gmail.com",
+        "date": "2021-01-14T08:34:14Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2021-01-14T08:34:14Z"
+      },
+      "message": "chore: rename project (#265)",
+      "tree": {
+        "sha": "853d8d79ab3fe498fcb415fb71ac8901de0272df",
+        "url": "https://api.github.com/repos/ti-community-infra/tichi/git/trees/853d8d79ab3fe498fcb415fb71ac8901de0272df"
+      },
+      "url": "https://api.github.com/repos/ti-community-infra/tichi/git/commits/68af84c32436c16564e1ac3c6ac36090d5d0baee",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsBcBAABCAAQBQJgAAIGCRBK7hj4Ov3rIwAAdHIIAFdNBdgiG48GtiSXpbwXCpiq\nLTvCiJEkoRsuggNKlhvXvt3xEeVki8T0WcrKY70mkdNA11ie9PXdHLSowGyFYFRS\n9FwEUBKLBTYIyTpgvuBcUb17/M3QnobmIF1X66T/vxnqy8xvny6kRUk8qsxhLi6K\n5v61mHt3J5F+DwFhVaUVniMnUnQTdW+o9Utd8zEkKbT2pJkvi6cSAiQK6RqIBD7l\nZTBWgKtvrk75u1xBfqcTRRe00qmJdW+OmgPIhRKP9PGRLOrHUeLBs8Ov1YaSBa08\njd92057tt8tigiQBBgo6cTMlK0tupIf+YS5es3eNNVYkEdfxeZ8fRgwghfOLNAQ=\n=5STI\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree 853d8d79ab3fe498fcb415fb71ac8901de0272df\nparent a17a9df826165b832476c13c5f93ed8e7b58f2ce\nauthor Rustin Liu <rustin.liu@gmail.com> 1610613254 +0800\ncommitter GitHub <noreply@github.com> 1610613254 +0800\n\nchore: rename project (#265)\n\n"
+      }
+    },
+    "url": "https://api.github.com/repos/ti-community-infra/tichi/commits/68af84c32436c16564e1ac3c6ac36090d5d0baee",
+    "html_url": "https://github.com/ti-community-infra/tichi/commit/68af84c32436c16564e1ac3c6ac36090d5d0baee",
+    "comments_url": "https://api.github.com/repos/ti-community-infra/tichi/commits/68af84c32436c16564e1ac3c6ac36090d5d0baee/comments",
+    "author": {
+      "login": "hi-rustin",
+      "id": 29879298,
+      "node_id": "MDQ6VXNlcjI5ODc5Mjk4",
+      "avatar_url": "https://avatars.githubusercontent.com/u/29879298?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/hi-rustin",
+      "html_url": "https://github.com/hi-rustin",
+      "followers_url": "https://api.github.com/users/hi-rustin/followers",
+      "following_url": "https://api.github.com/users/hi-rustin/following{/other_user}",
+      "gists_url": "https://api.github.com/users/hi-rustin/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/hi-rustin/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/hi-rustin/subscriptions",
+      "organizations_url": "https://api.github.com/users/hi-rustin/orgs",
+      "repos_url": "https://api.github.com/users/hi-rustin/repos",
+      "events_url": "https://api.github.com/users/hi-rustin/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/hi-rustin/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "a17a9df826165b832476c13c5f93ed8e7b58f2ce",
+        "url": "https://api.github.com/repos/ti-community-infra/tichi/commits/a17a9df826165b832476c13c5f93ed8e7b58f2ce",
+        "html_url": "https://github.com/ti-community-infra/tichi/commit/a17a9df826165b832476c13c5f93ed8e7b58f2ce"
+      }
+    ]
+  }
+]`)
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		if r.Method != http.MethodGet {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		expectedPath := "/repos/org/repo/commits"
+		if r.URL.Path != expectedPath {
+			t.Errorf("expected path %s, got path %s", expectedPath, r.URL.Path)
+		}
+		expectRequestURI := "/repos/org/repo/commits?path=README.md&per_page=100"
+		if r.URL.RequestURI() != expectRequestURI {
+			t.Errorf("expected request URI %s, got request URI %s", expectRequestURI, r.URL.RequestURI())
+		}
+		w.Write(githubResponse)
+	}))
+	defer ts.Close()
+
+	c := getClient(ts.URL)
+	commits, err := c.ListFileCommits("org", "repo", "README.md")
+	if err != nil {
+		t.Errorf("Didn't expect error: %v", err)
+	} else if len(commits) != 2 {
+		t.Errorf("Expected two commits, found %d: %v", len(commits), commits)
+		return
+	}
+	if commits[0].Author.Login != "hi-rustin" {
+		t.Errorf("Wrong author login for index 0: %v", commits[0])
+	}
+	if commits[1].Author.Login != "hi-rustin" {
+		t.Errorf("Wrong author login for index 1: %v", commits[1])
 	}
 }
 
@@ -531,12 +851,12 @@ func TestListIssueComments(t *testing.T) {
 	}
 }
 
-func TestAddLabel(t *testing.T) {
-	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func addLabelHTTPServer(t *testing.T, org, repo string, number int, labels ...string) *httptest.Server {
+	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("Bad method: %s", r.Method)
 		}
-		if r.URL.Path != "/repos/k8s/kuber/issues/5/labels" {
+		if r.URL.Path != fmt.Sprintf("/repos/%s/%s/issues/%d/labels", org, repo, number) {
 			t.Errorf("Bad request path: %s", r.URL.Path)
 		}
 		b, err := ioutil.ReadAll(r.Body)
@@ -546,16 +866,60 @@ func TestAddLabel(t *testing.T) {
 		var ls []string
 		if err := json.Unmarshal(b, &ls); err != nil {
 			t.Errorf("Could not unmarshal request: %v", err)
-		} else if len(ls) != 1 {
+		} else if len(ls) != len(labels) {
 			t.Errorf("Wrong length labels: %v", ls)
-		} else if ls[0] != "yay" {
-			t.Errorf("Wrong label: %s", ls[0])
+		}
+
+		for index, label := range labels {
+			if ls[index] != label {
+				t.Errorf("Wrong label: %s", ls[index])
+			}
 		}
 	}))
+}
+
+func TestAddLabel(t *testing.T) {
+	ts := addLabelHTTPServer(t, "k8s", "kuber", 5, "yay")
 	defer ts.Close()
 	c := getClient(ts.URL)
 	if err := c.AddLabel("k8s", "kuber", 5, "yay"); err != nil {
 		t.Errorf("Didn't expect error: %v", err)
+	}
+}
+
+func TestAddLabels(t *testing.T) {
+	testCases := []struct {
+		name   string
+		org    string
+		repo   string
+		number int
+		labels []string
+	}{
+		{
+			name:   "one label",
+			org:    "k8s",
+			repo:   "kuber",
+			number: 1,
+			labels: []string{"one"},
+		},
+		{
+			name:   "two label",
+			org:    "k8s",
+			repo:   "kuber",
+			number: 2,
+			labels: []string{"one", "two"},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := addLabelHTTPServer(t, tc.org, tc.repo, tc.number, tc.labels...)
+			defer ts.Close()
+
+			c := getClient(ts.URL)
+			if err := c.AddLabels(tc.org, tc.repo, tc.number, tc.labels...); err != nil {
+				t.Errorf("Didn't expect error: %v", err)
+			}
+		})
 	}
 }
 
@@ -607,6 +971,12 @@ func TestRemoveLabelNotFound(t *testing.T) {
 	}
 }
 
+func TestNewNotFoundIsNotFound(t *testing.T) {
+	if !IsNotFound(NewNotFound()) {
+		t.Error("NewNotFound didn't return an error that was considered a NotFound")
+	}
+}
+
 func TestIsNotFound(t *testing.T) {
 	testCases := []struct {
 		name       string
@@ -654,6 +1024,45 @@ func TestIsNotFound(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIsNotFound_nested(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name        string
+		err         error
+		expectMatch bool
+	}{
+		{
+			name:        "direct match",
+			err:         requestError{ClientError: ClientError{Errors: []clientErrorSubError{{Message: "status code 404"}}}},
+			expectMatch: true,
+		},
+		{
+			name:        "direct, no match",
+			err:         requestError{ClientError: ClientError{Errors: []clientErrorSubError{{Message: "status code 403"}}}},
+			expectMatch: false,
+		},
+		{
+			name:        "nested match",
+			err:         fmt.Errorf("wrapping: %w", requestError{ClientError: ClientError{Errors: []clientErrorSubError{{Message: "status code 404"}}}}),
+			expectMatch: true,
+		},
+		{
+			name:        "nested, no match",
+			err:         fmt.Errorf("wrapping: %w", requestError{ClientError: ClientError{Errors: []clientErrorSubError{{Message: "status code 403"}}}}),
+			expectMatch: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if result := IsNotFound(tc.err); result != tc.expectMatch {
+				t.Errorf("expected match: %t, got match: %t", tc.expectMatch, result)
+			}
+		})
+	}
+
 }
 
 func TestAssignIssue(t *testing.T) {
@@ -756,49 +1165,88 @@ func TestUnassignIssue(t *testing.T) {
 }
 
 func TestReadPaginatedResults(t *testing.T) {
-	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("Bad method: %s", r.Method)
-		}
-		if r.URL.Path == "/label/foo" {
-			objects := []Label{{Name: "foo"}}
-			b, err := json.Marshal(objects)
-			if err != nil {
-				t.Fatalf("Didn't expect error: %v", err)
+	type response struct {
+		labels []Label
+		next   string
+	}
+	cases := []struct {
+		name           string
+		baseSuffix     string
+		initialPath    string
+		responses      map[string]response
+		expectedLabels []Label
+	}{
+		{
+			name:        "regular pagination",
+			initialPath: "/label/foo",
+			responses: map[string]response{
+				"/label/foo": {
+					labels: []Label{{Name: "foo"}},
+					next:   `<blorp>; rel="first", <https://%s/label/bar>; rel="next"`,
+				},
+				"/label/bar": {
+					labels: []Label{{Name: "bar"}},
+				},
+			},
+			expectedLabels: []Label{{Name: "foo"}, {Name: "bar"}},
+		},
+		{
+			name:        "pagination with /api/v3 base suffix",
+			initialPath: "/label/foo",
+			baseSuffix:  "/api/v3",
+			responses: map[string]response{
+				"/api/v3/label/foo": {
+					labels: []Label{{Name: "foo"}},
+					next:   `<blorp>; rel="first", <https://%s/api/v3/label/bar>; rel="next"`,
+				},
+				"/api/v3/label/bar": {
+					labels: []Label{{Name: "bar"}},
+				},
+			},
+			expectedLabels: []Label{{Name: "foo"}, {Name: "bar"}},
+		},
+	}
+	for _, tc := range cases {
+		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Errorf("Bad method: %s", r.Method)
 			}
-			w.Header().Set("Link", fmt.Sprintf(`<blorp>; rel="first", <https://%s/label/bar>; rel="next"`, r.Host))
-			fmt.Fprint(w, string(b))
-		} else if r.URL.Path == "/label/bar" {
-			objects := []Label{{Name: "bar"}}
-			b, err := json.Marshal(objects)
-			if err != nil {
-				t.Fatalf("Didn't expect error: %v", err)
+			if response, ok := tc.responses[r.URL.Path]; ok {
+				b, err := json.Marshal(response.labels)
+				if err != nil {
+					t.Fatalf("Didn't expect error: %v", err)
+				}
+				if response.next != "" {
+					w.Header().Set("Link", fmt.Sprintf(response.next, r.Host))
+				}
+				fmt.Fprint(w, string(b))
+			} else {
+				t.Errorf("Bad request path: %s", r.URL.Path)
 			}
-			fmt.Fprint(w, string(b))
+		}))
+		defer ts.Close()
+
+		c := getClient(ts.URL)
+		c.bases[0] = c.bases[0] + tc.baseSuffix
+		var labels []Label
+		err := c.readPaginatedResults(
+			tc.initialPath,
+			"",
+			"",
+			func() interface{} {
+				return &[]Label{}
+			},
+			func(obj interface{}) {
+				labels = append(labels, *(obj.(*[]Label))...)
+			},
+		)
+		if err != nil {
+			t.Errorf("%s: didn't expect error: %v", tc.name, err)
 		} else {
-			t.Errorf("Bad request path: %s", r.URL.Path)
+			if !reflect.DeepEqual(labels, tc.expectedLabels) {
+				t.Errorf("%s: expected %s, got %s", tc.name, tc.expectedLabels, labels)
+			}
 		}
-	}))
-	defer ts.Close()
-	c := getClient(ts.URL)
-	path := "/label/foo"
-	var labels []Label
-	err := c.readPaginatedResults(
-		path,
-		"",
-		func() interface{} {
-			return &[]Label{}
-		},
-		func(obj interface{}) {
-			labels = append(labels, *(obj.(*[]Label))...)
-		},
-	)
-	if err != nil {
-		t.Errorf("Didn't expect error: %v", err)
-	} else if len(labels) != 2 {
-		t.Errorf("Expected two labels, found %d: %v", len(labels), labels)
-	} else if labels[0].Name != "foo" || labels[1].Name != "bar" {
-		t.Errorf("Wrong label names: %v", labels)
 	}
 }
 
@@ -1203,7 +1651,7 @@ func TestFindIssues(t *testing.T) {
 			t.Errorf("%s: didn't expect error: %v", tc.name, err)
 		}
 		if len(result) != 1 {
-			t.Errorf("%s: unexpected number of results: %v", tc.name, len(result))
+			t.Fatalf("%s: unexpected number of results: %v", tc.name, len(result))
 		}
 		if result[0].Number != issueNum {
 			t.Errorf("%s: expected issue number %+v, got %+v", tc.name, issueNum, result[0].Number)
@@ -1429,10 +1877,10 @@ func TestEditTeam(t *testing.T) {
 	}))
 	defer ts.Close()
 	c := getClient(ts.URL)
-	if _, err := c.EditTeam(Team{ID: 0, Name: "frobber"}); err == nil {
+	if _, err := c.EditTeam("", Team{ID: 0, Name: "frobber"}); err == nil {
 		t.Errorf("client should reject id 0")
 	}
-	switch team, err := c.EditTeam(Team{ID: 63, Name: "frobber"}); {
+	switch team, err := c.EditTeam("", Team{ID: 63, Name: "frobber"}); {
 	case err != nil:
 		t.Errorf("unexpected error: %v", err)
 	case team.Name != "hello":
@@ -1448,7 +1896,7 @@ func TestListTeamMembers(t *testing.T) {
 	ts := simpleTestServer(t, "/teams/1/members", []TeamMember{{Login: "foo"}})
 	defer ts.Close()
 	c := getClient(ts.URL)
-	teamMembers, err := c.ListTeamMembers(1, RoleAll)
+	teamMembers, err := c.ListTeamMembers("", 1, RoleAll)
 	if err != nil {
 		t.Errorf("Didn't expect error: %v", err)
 	} else if len(teamMembers) != 1 {
@@ -2249,9 +2697,9 @@ func TestAuthHeaderGetsSet(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeHttpClient{}
-			c := &client{delegate: &delegate{client: fake}}
+			c := &client{delegate: &delegate{client: fake}, logger: logrus.NewEntry(logrus.New())}
 			tc.mod(c)
-			if _, err := c.doRequest("POST", "/hello", "", nil); err != nil {
+			if _, err := c.doRequest("POST", "/hello", "", "", nil); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if tc.expectedHeader == nil {
@@ -2268,6 +2716,7 @@ func TestAuthHeaderGetsSet(t *testing.T) {
 		})
 	}
 }
+
 func TestListTeamRepos(t *testing.T) {
 	ts := simpleTestServer(t, "/teams/1/repos",
 		[]Repo{
@@ -2282,12 +2731,368 @@ func TestListTeamRepos(t *testing.T) {
 	)
 	defer ts.Close()
 	c := getClient(ts.URL)
-	repos, err := c.ListTeamRepos(1)
+	repos, err := c.ListTeamRepos("", 1)
 	if err != nil {
 		t.Errorf("Didn't expect error: %v", err)
 	} else if len(repos) != 1 {
 		t.Errorf("Expected one repo, found %d: %v", len(repos), repos)
 	} else if repos[0].Name != "repo-bar" {
 		t.Errorf("Wrong repos: %v", repos)
+	}
+}
+
+func TestCreateFork(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		if r.URL.Path != "/repos/k8s/kuber/forks" {
+			t.Errorf("Bad request path: %s", r.URL.Path)
+		}
+		w.WriteHeader(202)
+		w.Write([]byte(`{"name":"other"}`))
+	}))
+	defer ts.Close()
+	c := getClient(ts.URL)
+	if name, err := c.CreateFork("k8s", "kuber"); err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	} else {
+		if name != "other" {
+			t.Errorf("Unexpected fork name: %v", name)
+		}
+	}
+}
+
+func TestToCurl(t *testing.T) {
+	testCases := []struct {
+		name     string
+		request  *http.Request
+		expected string
+	}{
+		{
+			name:     "Authorization Header with bearer type gets masked",
+			request:  &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "https", Host: "api.github.com"}, Header: http.Header{"Authorization": []string{"Bearer secret-token"}}},
+			expected: `curl -k -v -XGET  -H "Authorization: Bearer <masked>" 'https://api.github.com'`,
+		},
+		{
+			name:     "Authorization Header with unknown type gets masked",
+			request:  &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "https", Host: "api.github.com"}, Header: http.Header{"Authorization": []string{"Definitely-not-valid secret-token"}}},
+			expected: `curl -k -v -XGET  -H "Authorization: <masked>" 'https://api.github.com'`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if result := toCurl(tc.request); result != tc.expected {
+				t.Errorf("result %s differs from expected %s", result, tc.expected)
+			}
+		})
+	}
+}
+
+type testRoundTripper struct {
+	rt func(*http.Request) (*http.Response, error)
+}
+
+func (rt testRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return rt.rt(r)
+}
+
+// TestAllMethodsThatDoRequestSetOrgHeader uses reflect to find all methods of the Client and
+// their arguments and calls them with an empty argument, then verifies via a RoundTripper that
+// all requests made had an org header set.
+func TestAllMethodsThatDoRequestSetOrgHeader(t *testing.T) {
+	_, ghClient := NewAppsAuthClientWithFields(logrus.Fields{}, func(_ []byte) []byte { return nil }, "some-app-id", func() *rsa.PrivateKey { return nil }, "", "")
+	clientType := reflect.TypeOf(ghClient)
+	stringType := reflect.TypeOf("")
+	stringValue := reflect.ValueOf("org")
+
+	toSkip := sets.NewString(
+		// Doesn't support github apps
+		"Query",
+		// They fetch the user, which doesn't exist in case of github app.
+		// TODO: Split the search query by org when app auth is used
+		"FindIssues",
+		// Bound to user, not org specific
+		"ListCurrentUserRepoInvitations",
+		// Bound to user, not org specific
+		"AcceptUserRepoInvitation",
+		// Bound to user, not org specific
+		"ListCurrentUserOrgInvitations",
+	)
+
+	for i := 0; i < clientType.NumMethod(); i++ {
+		if toSkip.Has(clientType.Method(i).Name) {
+			continue
+		}
+		t.Run(clientType.Method(i).Name, func(t *testing.T) {
+
+			checkingRoundTripper := testRoundTripper{func(r *http.Request) (*http.Response, error) {
+				if !strings.HasPrefix(r.URL.Path, "/app") {
+					var orgVal string
+					if v := r.Context().Value(githubOrgHeaderKey); v != nil {
+						orgVal = v.(string)
+					}
+					if orgVal != "org" {
+						t.Errorf("Request didn't have %s header set to 'org'", githubOrgHeaderKey)
+					}
+				}
+				return &http.Response{Body: ioutil.NopCloser(&bytes.Buffer{})}, nil
+			}}
+
+			ghClient.(*client).client.(*http.Client).Transport = checkingRoundTripper
+			ghClient.(*client).gqlc.(*graphQLGitHubAppsAuthClientWrapper).Client = githubv4.NewClient(&http.Client{Transport: checkingRoundTripper})
+			clientValue := reflect.ValueOf(ghClient)
+
+			var args []reflect.Value
+			// First arg is self, so start with second arg
+			for j := 1; j < clientType.Method(i).Func.Type().NumIn(); j++ {
+				arg := reflect.New(clientType.Method(i).Func.Type().In(j)).Elem()
+				if arg.Kind() == reflect.Ptr && arg.IsNil() {
+					arg.Set(reflect.New(arg.Type().Elem()))
+				}
+
+				if arg.Type() == stringType {
+					arg.Set(stringValue)
+				}
+
+				// We can not deal with interface types genererically, as there
+				// is no automatic way to figure out the concrete values they
+				// can or should be set to.
+				if arg.Type().String() == "context.Context" {
+					arg.Set(reflect.ValueOf(context.Background()))
+				}
+				if arg.Type().String() == "interface {}" {
+					arg.Set(reflect.ValueOf(map[string]interface{}{}))
+				}
+
+				// Just set all strings to a nonEmpty string, otherwise the header will not get set
+				args = append(args, arg)
+			}
+
+			if clientType.Method(i).Type.IsVariadic() {
+				args[len(args)-1] = reflect.New(args[len(args)-1].Type().Elem()).Elem()
+			}
+
+			// We don't care about the result at all, the verification happens via the roundTripper
+			_ = clientValue.Method(i).Call(args)
+		})
+	}
+}
+
+func TestBotUserChecker(t *testing.T) {
+	const savedLogin = "botName"
+	testCases := []struct {
+		name         string
+		checkFor     string
+		usesAppsAuth bool
+		expectMatch  bool
+	}{
+		{
+			name:         "Bot suffix with apps auth is recognized",
+			checkFor:     savedLogin + "[bot]",
+			usesAppsAuth: true,
+			expectMatch:  true,
+		},
+		{
+			name:         "No suffix with apps auth is recognized",
+			checkFor:     savedLogin,
+			usesAppsAuth: true,
+			expectMatch:  true,
+		},
+		{
+			name:         "No suffix without apps auth is recognized",
+			checkFor:     savedLogin,
+			usesAppsAuth: false,
+			expectMatch:  true,
+		},
+		{
+			name:         "Suffix without apps auth is not recognized",
+			checkFor:     savedLogin + "[bot]",
+			usesAppsAuth: false,
+			expectMatch:  false,
+		},
+	}
+
+	for _, tc := range testCases {
+		c := &client{delegate: &delegate{usesAppsAuth: tc.usesAppsAuth, userData: &UserData{Login: savedLogin}}}
+
+		checker, err := c.BotUserChecker()
+		if err != nil {
+			t.Fatalf("failed to get user checker: %v", err)
+		}
+		if actualMatch := checker(tc.checkFor); actualMatch != tc.expectMatch {
+			t.Errorf("expect match: %t, got match: %t", tc.expectMatch, actualMatch)
+		}
+	}
+}
+
+func TestV4ClientSetsUserAgent(t *testing.T) {
+	// Make sure this is deterministic in tests
+	version.Version = "0"
+	var expectedUserAgent string
+	roundTripper := testRoundTripper{func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("User-Agent"); got != expectedUserAgent {
+			return nil, fmt.Errorf("expected User-Agent %q, got %q", expectedUserAgent, got)
+		}
+		return &http.Response{StatusCode: 200, Body: ioutil.NopCloser(bytes.NewBufferString("{}"))}, nil
+	}}
+
+	_, client := newClient(
+		logrus.Fields{},
+		func() []byte { return nil },
+		func(b []byte) []byte { return b },
+		"",
+		nil,
+		"",
+		false,
+		nil,
+		roundTripper,
+	)
+
+	t.Run("User agent gets set initially", func(t *testing.T) {
+		expectedUserAgent = "unset/0"
+		if err := client.QueryWithGitHubAppsSupport(context.Background(), struct{}{}, nil, ""); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("ForPlugin changes the user agent accordingly", func(t *testing.T) {
+		client := client.ForPlugin("test-plugin")
+		expectedUserAgent = "unset.test-plugin/0"
+		if err := client.QueryWithGitHubAppsSupport(context.Background(), struct{}{}, nil, ""); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("The ForPlugin call doesn't manipulate the original client", func(t *testing.T) {
+		expectedUserAgent = "unset/0"
+		if err := client.QueryWithGitHubAppsSupport(context.Background(), struct{}{}, nil, ""); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("ForSubcomponent changes the user agent accordingly", func(t *testing.T) {
+		client := client.ForSubcomponent("test-plugin")
+		expectedUserAgent = "unset.test-plugin/0"
+		if err := client.QueryWithGitHubAppsSupport(context.Background(), struct{}{}, nil, ""); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("The ForSubcomponent call doesn't manipulate the original client", func(t *testing.T) {
+		expectedUserAgent = "unset/0"
+		if err := client.QueryWithGitHubAppsSupport(context.Background(), struct{}{}, nil, ""); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+func TestGetDirectory(t *testing.T) {
+	expectedContents := []DirectoryContent{
+		{
+			Type: "file",
+			Name: "bar",
+			Path: "foo/bar",
+		},
+		{
+			Type: "dir",
+			Name: "hello",
+			Path: "foo/hello",
+		},
+	}
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		if r.URL.Path != "/repos/k8s/kuber/contents/foo" {
+			t.Errorf("Bad request path: %s", r.URL.Path)
+		}
+		if r.URL.RawQuery != "" {
+			t.Errorf("Bad request query: %s", r.URL.RawQuery)
+		}
+		b, err := json.Marshal(&expectedContents)
+		if err != nil {
+			t.Fatalf("Didn't expect error: %v", err)
+		}
+		fmt.Fprint(w, string(b))
+	}))
+	defer ts.Close()
+	c := getClient(ts.URL)
+	if contents, err := c.GetDirectory("k8s", "kuber", "foo", ""); err != nil {
+		t.Errorf("Didn't expect error: %v", err)
+	} else if len(contents) != 2 {
+		t.Errorf("Expected two contents, found %d: %v", len(contents), contents)
+		return
+	} else if !reflect.DeepEqual(contents, expectedContents) {
+		t.Errorf("Wrong list of teams, expected: %v, got: %v", expectedContents, contents)
+	}
+}
+
+func TestGetDirectoryRef(t *testing.T) {
+	expectedContents := []DirectoryContent{
+		{
+			Type: "file",
+			Name: "bar.go",
+			Path: "foo/bar.go",
+		},
+		{
+			Type: "dir",
+			Name: "hello",
+			Path: "foo/hello",
+		},
+	}
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		if r.URL.Path != "/repos/k8s/kuber/contents/foo" {
+			t.Errorf("Bad request path: %s", r.URL.Path)
+		}
+		if r.URL.RawQuery != "ref=12345" {
+			t.Errorf("Bad request query: %s", r.URL.RawQuery)
+		}
+		b, err := json.Marshal(&expectedContents)
+		if err != nil {
+			t.Fatalf("Didn't expect error: %v", err)
+		}
+		fmt.Fprint(w, string(b))
+	}))
+	defer ts.Close()
+	c := getClient(ts.URL)
+	if contents, err := c.GetDirectory("k8s", "kuber", "foo", "12345"); err != nil {
+		t.Errorf("Didn't expect error: %v", err)
+	} else if len(contents) != 2 {
+		t.Errorf("Expected two contents, found %d: %v", len(contents), contents)
+		return
+	} else if !reflect.DeepEqual(contents, expectedContents) {
+		t.Errorf("Wrong list of teams, expected: %v, got: %v", expectedContents, contents)
+	}
+}
+
+func TestCreatePullRequestReviewComment(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		if r.URL.Path != "/repos/k8s/kuber/pulls/5/comments" {
+			t.Errorf("Bad request path: %s", r.URL.Path)
+		}
+		b, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("Could not read request body: %v", err)
+		}
+		var rc ReviewComment
+		if err := json.Unmarshal(b, &rc); err != nil {
+			t.Errorf("Could not unmarshal request: %v", err)
+		} else if rc.Body != "hello" {
+			t.Errorf("Wrong body: %s", rc.Body)
+		}
+		http.Error(w, "201 Created", http.StatusCreated)
+	}))
+	defer ts.Close()
+	c := getClient(ts.URL)
+	if err := c.CreatePullRequestReviewComment("k8s", "kuber", 5, ReviewComment{Body: "hello"}); err != nil {
+		t.Errorf("Didn't expect error: %v", err)
 	}
 }

@@ -23,7 +23,6 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"os/exec"
 	"path"
 	"time"
 
@@ -73,8 +72,9 @@ type ServicePrincipalProfile struct {
 }
 
 type LinuxProfile struct {
-	AdminUsername string `json:"adminUsername"`
-	SSHKeys       *SSH   `json:"ssh"`
+	RunUnattendedUpgradesOnBootstrap bool   `json:"runUnattendedUpgradesOnBootstrap"`
+	AdminUsername                    string `json:"adminUsername"`
+	SSHKeys                          *SSH   `json:"ssh"`
 }
 
 type SSH struct {
@@ -86,17 +86,30 @@ type PublicKey struct {
 }
 
 type WindowsProfile struct {
-	AdminUsername         string `json:"adminUsername,omitempty"`
-	AdminPassword         string `json:"adminPassword,omitempty"`
-	ImageVersion          string `json:"imageVersion,omitempty"`
-	WindowsImageSourceURL string `json:"WindowsImageSourceUrl"`
-	WindowsPublisher      string `json:"WindowsPublisher"`
-	WindowsOffer          string `json:"WindowsOffer"`
-	WindowsSku            string `json:"WindowsSku"`
-	WindowsDockerVersion  string `json:"windowsDockerVersion"`
-	SSHEnabled            bool   `json:"sshEnabled,omitempty"`
-	EnableCSIProxy        bool   `json:"enableCSIProxy,omitempty"`
-	CSIProxyURL           string `json:"csiProxyURL,omitempty"`
+	AdminUsername         string           `json:"adminUsername,omitempty"`
+	AdminPassword         string           `json:"adminPassword,omitempty"`
+	ImageVersion          string           `json:"imageVersion,omitempty"`
+	WindowsImageSourceURL string           `json:"WindowsImageSourceUrl"`
+	WindowsPublisher      string           `json:"WindowsPublisher"`
+	WindowsOffer          string           `json:"WindowsOffer"`
+	WindowsSku            string           `json:"WindowsSku"`
+	WindowsDockerVersion  string           `json:"windowsDockerVersion"`
+	SSHEnabled            bool             `json:"sshEnabled,omitempty"`
+	EnableCSIProxy        bool             `json:"enableCSIProxy,omitempty"`
+	CSIProxyURL           string           `json:"csiProxyURL,omitempty"`
+	WindowsRuntimes       *WindowsRuntimes `json:"windowsRuntimes,omitempty"`
+	WindowsPauseImageURL  string           `json:"windowsPauseImageURL,omitempty"`
+}
+
+// WindowsRuntimes configures containerd runtimes that are available on the windows nodes
+type WindowsRuntimes struct {
+	Default        string            `json:"default,omitempty"`
+	HypervRuntimes []RuntimeHandlers `json:"hypervRuntimes,omitempty"`
+}
+
+// RuntimeHandlers configures the runtime settings in containerd
+type RuntimeHandlers struct {
+	BuildNumber string `json:"buildNumber,omitempty"`
 }
 
 // KubernetesContainerSpec defines configuration for a container spec
@@ -180,6 +193,7 @@ type MasterProfile struct {
 	OSDiskSizeGB        int                 `json:"osDiskSizeGB,omitempty" validate:"min=0,max=1023"`
 	AvailabilityProfile string              `json:"availabilityProfile,omitempty"`
 	AvailabilityZones   []string            `json:"availabilityZones,omitempty"`
+	UltraSSDEnabled     bool                `json:"ultraSSDEnabled,omitempty"`
 }
 
 type AgentPoolProfile struct {
@@ -196,6 +210,7 @@ type AgentPoolProfile struct {
 	OSDiskSizeGB           int                 `json:"osDiskSizeGB,omitempty" validate:"min=0,max=1023"`
 	EnableVMSSNodePublicIP bool                `json:"enableVMSSNodePublicIP,omitempty"`
 	StorageProfile         string              `json:"storageProfile,omitempty"`
+	UltraSSDEnabled        bool                `json:"ultraSSDEnabled,omitempty"`
 }
 
 type AzureClient struct {
@@ -468,32 +483,4 @@ func toBool(b *bool) bool {
 		return false
 	}
 	return *b
-}
-
-func installAzureCLI() error {
-	if err := control.FinishRunning(exec.Command("curl", "-sL", "https://packages.microsoft.com/keys/microsoft.asc", "-o", "msft.asc")); err != nil {
-		return err
-	}
-
-	if err := control.FinishRunning(exec.Command("gpg", "--batch", "--yes", "-o", "/etc/apt/trusted.gpg.d/microsoft.asc.gpg", "--dearmor", "msft.asc")); err != nil {
-		return err
-	}
-
-	if err := control.FinishRunning(exec.Command("bash", "-c", "echo \"deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli $(lsb_release -cs) main\" | tee /etc/apt/sources.list.d/azure-cli.list")); err != nil {
-		return err
-	}
-
-	if err := control.FinishRunning(exec.Command("apt-get", "update")); err != nil {
-		return err
-	}
-
-	if err := control.FinishRunning(exec.Command("apt-get", "install", "-y", "azure-cli")); err != nil {
-		return err
-	}
-
-	if err := os.Remove("msft.asc"); err != nil {
-		return err
-	}
-
-	return nil
 }

@@ -1,6 +1,7 @@
 presubmits:
   kubernetes/kubernetes:
   - name: pull-kubernetes-typecheck
+    cluster: k8s-infra-prow-build
     path_alias: "k8s.io/kubernetes"
     decorate: true
     always_run: true
@@ -18,7 +19,14 @@ presubmits:
       - name: main
         command:
         - make
-        image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+        image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
+        resources:
+          limits:
+            cpu: 5
+            memory: 32Gi
+          requests:
+            cpu: 5
+            memory: 32Gi
         args:
         - verify
         env:

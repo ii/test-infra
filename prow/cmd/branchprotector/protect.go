@@ -17,7 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"net/url"
@@ -34,6 +33,7 @@ import (
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/config/secret"
 	"k8s.io/test-infra/prow/flagutil"
+	configflagutil "k8s.io/test-infra/prow/flagutil/config"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/logrusutil"
 )
@@ -44,8 +44,7 @@ const (
 )
 
 type options struct {
-	config             string
-	jobConfig          string
+	config             configflagutil.ConfigOptions
 	confirm            bool
 	verifyRestrictions bool
 	tokens             int
@@ -58,8 +57,8 @@ func (o *options) Validate() error {
 		return err
 	}
 
-	if o.config == "" {
-		return errors.New("empty --config-path")
+	if err := o.config.Validate(!o.confirm); err != nil {
+		return err
 	}
 
 	return nil
@@ -68,12 +67,11 @@ func (o *options) Validate() error {
 func gatherOptions() options {
 	o := options{}
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	fs.StringVar(&o.config, "config-path", "", "Path to prow config.yaml")
-	fs.StringVar(&o.jobConfig, "job-config-path", "", "Path to prow job configs.")
 	fs.BoolVar(&o.confirm, "confirm", false, "Mutate github if set")
 	fs.BoolVar(&o.verifyRestrictions, "verify-restrictions", false, "Verify the restrictions section of the request for authorized collaborators/teams")
 	fs.IntVar(&o.tokens, "tokens", defaultTokens, "Throttle hourly token consumption (0 to disable)")
 	fs.IntVar(&o.tokenBurst, "token-burst", defaultBurst, "Allow consuming a subset of hourly tokens in a short burst")
+	o.config.AddFlags(fs)
 	o.github.AddFlags(fs)
 	fs.Parse(os.Args[1:])
 	return o
@@ -107,10 +105,11 @@ func main() {
 		logrus.Fatal(err)
 	}
 
-	cfg, err := config.Load(o.config, o.jobConfig)
+	ca, err := o.config.ConfigAgent()
 	if err != nil {
-		logrus.WithError(err).Fatalf("Failed to load --config-path=%s", o.config)
+		logrus.WithError(err).Fatalf("Failed to load --config-path=%s", o.config.ConfigPath)
 	}
+	cfg := ca.Config()
 	cfg.BranchProtectionWarnings(logrus.NewEntry(logrus.StandardLogger()), cfg.PresubmitsStatic)
 
 	secretAgent := &secret.Agent{}
@@ -196,7 +195,7 @@ func (p *protector) protect() {
 	}
 
 	// Do not automatically protect tested repositories
-	if !bp.ProtectTested {
+	if bp.ProtectTested == nil || !*bp.ProtectTested {
 		return
 	}
 
@@ -205,7 +204,7 @@ func (p *protector) protect() {
 	// know which repos exist. Repos that use in-repo config will appear here,
 	// because we generate a verification job for them
 	for repo := range p.cfg.PresubmitsStatic {
-		if p.completedRepos[repo] == true {
+		if p.completedRepos[repo] {
 			continue
 		}
 		parts := strings.Split(repo, "/")
@@ -494,7 +493,7 @@ func equalAdminEnforcement(state github.EnforceAdmins, request *bool) bool {
 		// bound by the branch protection rules. Therefore, making no
 		// request is equivalent to making a request to not enforce
 		// rules on admins.
-		return state.Enabled == false
+		return !state.Enabled
 	default:
 		return state.Enabled == *request
 	}

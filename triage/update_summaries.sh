@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2017 The Kubernetes Authors.
+# Copyright 2020 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -42,7 +42,8 @@ bq --headless --format=json query --max_rows 1000000 \
   from
     [k8s-gubernator:build.all]
   where
-    timestamp_to_sec(started) > TIMESTAMP_TO_SEC(DATE_ADD(CURRENT_DATE(), -14, 'DAY'))" \
+    timestamp_to_sec(started) > TIMESTAMP_TO_SEC(DATE_ADD(CURRENT_DATE(), -14, 'DAY'))
+    and job != 'ci-kubernetes-coverage-unit'" \
   > triage_builds.json
 
 bq query --allow_large_results --headless --max_rows 0 --replace --destination_table k8s-gubernator:temp.triage \
@@ -55,7 +56,9 @@ bq query --allow_large_results --headless --max_rows 0 --replace --destination_t
     [k8s-gubernator:build.all]
   where
     test.failed
-    and timestamp_to_sec(started) > TIMESTAMP_TO_SEC(DATE_ADD(CURRENT_DATE(), -14, 'DAY'))"
+    and timestamp_to_sec(started) > TIMESTAMP_TO_SEC(DATE_ADD(CURRENT_DATE(), -14, 'DAY'))
+    and job != 'ci-kubernetes-coverage-unit'"
+
 gsutil rm gs://k8s-gubernator/triage_tests/shard_*.json.gz || true
 bq extract --compression GZIP --destination_format NEWLINE_DELIMITED_JSON 'k8s-gubernator:temp.triage' gs://k8s-gubernator/triage_tests/shard_*.json.gz
 mkdir -p triage_tests
@@ -66,11 +69,12 @@ gzip -df triage_tests/*.gz
 
 mkdir -p slices
 
-pypy3 summarize.py \
-  triage_builds.json \
-  triage_tests/*.json \
+/triage \
+  --builds triage_builds.json \
   --output failure_data.json \
-  --output_slices slices/failure_data_PREFIX.json
+  --output_slices slices/failure_data_PREFIX.json \
+  ${NUM_WORKERS:+"--num_workers=${NUM_WORKERS}"} \
+  triage_tests/*.json
 
 gsutil_cp() {
   gsutil -h 'Cache-Control: no-store, must-revalidate' -m cp -Z -a public-read "$@"

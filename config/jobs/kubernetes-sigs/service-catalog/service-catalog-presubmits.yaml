@@ -27,7 +27,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
         command:
         # generic runner script, handles DIND, bazelrc for caching, etc.
         - runner.sh
@@ -42,10 +42,9 @@ presubmits:
     labels:
       preset-dind-enabled: "true"
       preset-kind-volume-mounts: "true"
-    optional: true
     spec:
       containers:
-        - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
           command:
             # generic runner script, handles DIND, bazelrc for caching, etc.
             - runner.sh
@@ -63,10 +62,9 @@ presubmits:
     labels:
       preset-dind-enabled: "true"
       preset-kind-volume-mounts: "true"
-    optional: true
     spec:
       containers:
-        - image: gcr.io/k8s-testimages/kubekins-e2e:v20200513-7c0e31a-master
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
           command:
             # generic runner script, handles DIND, bazelrc for caching, etc.
             - runner.sh
@@ -84,14 +82,13 @@ presubmits:
     labels:
       preset-dind-enabled: "true"
       preset-kind-volume-mounts: "true"
-    optional: true
     # Run only on PR created to master branch. K8s in version 1.18 is not supported for
     # legacy (v0.2.x) Service Catalog.
     branches:
       - master
     spec:
       containers:
-        - image: gcr.io/k8s-testimages/kubekins-e2e:v20200513-7c0e31a-master
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
           command:
             # generic runner script, handles DIND, bazelrc for caching, etc.
             - runner.sh
@@ -120,7 +117,7 @@ presubmits:
       - master
     spec:
       containers:
-        - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
           command:
             # generic runner script, handles DIND, bazelrc for caching, etc.
             - runner.sh
@@ -135,7 +132,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
         command:
         # generic runner script, handles DIND, bazelrc for caching, etc.
         - runner.sh
@@ -151,7 +148,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-        - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
           command:
             # generic runner script, handles DIND, bazelrc for caching, etc.
             - runner.sh
@@ -167,7 +164,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-        - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
           command:
             # generic runner script, handles DIND, bazelrc for caching, etc.
             - runner.sh
@@ -183,7 +180,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-        - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
           command:
             # generic runner script, handles DIND, bazelrc for caching, etc.
             - runner.sh
@@ -199,13 +196,13 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-        - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
           command:
             # generic runner script, handles DIND, bazelrc for caching, etc.
             - runner.sh
           args:
             - make
-            - arch-image-ppc64le
+            - arch-image-s390x
           # docker-in-docker needs privileged mode
           securityContext:
             privileged: true
@@ -215,7 +212,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-        - image: gcr.io/k8s-testimages/kubekins-e2e:v20200519-d13d3ca-master
+        - image: gcr.io/k8s-testimages/kubekins-e2e:v20210418-e5f251e-master
           command:
             # generic runner script, handles DIND, bazelrc for caching, etc.
             - runner.sh

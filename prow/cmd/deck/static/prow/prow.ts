@@ -31,12 +31,14 @@ interface RepoOptions {
     pulls: {[key: string]: boolean};
     batches: {[key: string]: boolean};
     states: {[key: string]: boolean};
+    clusters: {[key: string]: boolean};
 }
 
 function optionsForRepo(repository: string): RepoOptions {
     const opts: RepoOptions = {
         authors: {},
         batches: {},
+        clusters: {},
         jobs: {},
         pulls: {},
         repos: {},
@@ -47,6 +49,7 @@ function optionsForRepo(repository: string): RepoOptions {
     for (const build of allBuilds.items) {
         const {
             spec: {
+                cluster = "",
                 type = "",
                 job = "",
                 refs: {
@@ -59,6 +62,7 @@ function optionsForRepo(repository: string): RepoOptions {
         } = build;
 
         opts.types[type] = true;
+        opts.clusters[cluster] = true;
         const repoKey = `${org}/${repo}`;
         if (repoKey) {
             opts.repos[repoKey] = true;
@@ -102,6 +106,8 @@ function redrawOptions(fz: FuzzySearch, opts: RepoOptions) {
     }
     const ss = Object.keys(opts.states).sort();
     addOptions(ss, "state");
+    const cs = Object.keys(opts.clusters).sort();
+    addOptions(cs, "cluster");
 }
 
 function adjustScroll(el: Element): void {
@@ -256,6 +262,16 @@ window.onload = (): void => {
         }
         const targetRow = builds.childNodes[rowNumber] as HTMLTableRowElement;
         targetRow.scrollIntoView();
+    });
+    window.addEventListener("popstate", () => {
+        const optsPopped = optionsForRepo("");
+        const fzPopped = initFuzzySearch(
+            "job",
+            "job-input",
+            "job-list",
+            Object.keys(optsPopped.jobs).sort());
+        redrawOptions(fzPopped, optsPopped);
+        redraw(fzPopped, false);
     });
     // set dropdown based on options from query string
     const opts = optionsForRepo("");
@@ -414,11 +430,11 @@ function escapeRegexLiteral(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function redraw(fz: FuzzySearch): void {
+function redraw(fz: FuzzySearch, pushState: boolean = true): void {
     const rerunStatus = getParameterByName("rerun");
     const modal = document.getElementById('rerun')!;
     const rerunCommand = document.getElementById('rerun-content')!;
-    window.onclick = (event) => {
+    window.onclick = (event: any) => {
         if (event.target === modal) {
             modal.style.display = "none";
         }
@@ -433,7 +449,7 @@ function redraw(fz: FuzzySearch): void {
 
     function getSelection(name: string): string {
         const sel = selectionText(document.getElementById(name) as HTMLSelectElement);
-        if (sel && opts && !opts[name + 's' as keyof RepoOptions][sel]) {
+        if (sel && name !== 'repo' && !opts[name + 's' as keyof RepoOptions][sel]) {
             return "";
         }
         if (sel !== "") {
@@ -451,7 +467,7 @@ function redraw(fz: FuzzySearch): void {
         if (inputText !== "") {
             args.push(`${id}=${encodeURIComponent(inputText)}`);
         }
-        if (inputText !== "" && opts && opts[id + 's' as keyof RepoOptions][inputText]) {
+        if (inputText !== "" && opts[id + 's' as keyof RepoOptions][inputText]) {
             return new RegExp(`^${escapeRegexLiteral(inputText)}$`);
         }
         const expr = inputText.split('*').map(escapeRegexLiteral);
@@ -469,12 +485,13 @@ function redraw(fz: FuzzySearch): void {
     const authorSel = getSelection("author");
     const jobSel = getSelectionFuzzySearch("job", "job-input");
     const stateSel = getSelection("state");
+    const clusterSel = getSelection("cluster");
 
-    if (window.history && window.history.replaceState !== undefined) {
+    if (pushState && window.history && window.history.pushState !== undefined) {
         if (args.length > 0) {
-            history.replaceState(null, "", "/?" + args.join('&'));
+            history.pushState(null, "", "/?" + args.join('&'));
         } else {
-            history.replaceState(null, "", "/");
+            history.pushState(null, "", "/");
         }
     }
     fz.setDict(Object.keys(opts.jobs));
@@ -496,13 +513,25 @@ function redraw(fz: FuzzySearch): void {
                 name: prowJobName = "",
             },
             spec: {
+                cluster = "",
                 type = "",
                 job = "",
                 agent = "",
-                refs: {org = "", repo = "", repo_link = "", base_sha = "", base_link = "", pulls = [], base_ref = ""} = {},
+                refs: {repo_link = "", base_sha = "", base_link = "", pulls = [], base_ref = ""} = {},
+                pod_spec,
             },
             status: {startTime, completionTime = "", state = "", pod_name, build_id = "", url = ""},
         } = build;
+
+        let org = "";
+        let repo = "";
+        if (build.spec.refs !== undefined) {
+            org = build.spec.refs.org;
+            repo = build.spec.refs.repo;
+        } else if (build.spec.extra_refs !== undefined && build.spec.extra_refs.length > 0 ) {
+            org = build.spec.extra_refs[0].org;
+            repo = build.spec.extra_refs[0].repo;
+        }
 
         if (!equalSelected(typeSel, type)) {
             continue;
@@ -511,6 +540,9 @@ function redraw(fz: FuzzySearch): void {
             continue;
         }
         if (!equalSelected(stateSel, state)) {
+            continue;
+        }
+        if (!equalSelected(clusterSel, cluster)) {
             continue;
         }
         if (!jobSel.test(job)) {
@@ -571,7 +603,20 @@ function redraw(fz: FuzzySearch): void {
         r.appendChild(cell.state(state));
         if ((agent === "kubernetes" && pod_name) || agent !== "kubernetes") {
             const logIcon = icon.create("description", "Build log");
-            logIcon.href = `log?job=${job}&id=${build_id}`;
+            if (pod_spec == null || pod_spec.containers.length <= 1) {
+                logIcon.href = `log?job=${job}&id=${build_id}`;
+            } else {
+                // this logic exists for legacy jobs that are configured for gubernator compatibility
+                const buildIndex = url.indexOf('/build/');
+                if (buildIndex !== -1) {
+                    const gcsUrl = `${window.location.origin}/view/gcs/${url.substring(buildIndex + '/build/'.length)}`;
+                    logIcon.href = gcsUrl;
+                } else if (url.includes('/view/')) {
+                    logIcon.href = url;
+                } else {
+                    logIcon.href = `log?job=${job}&id=${build_id}`;
+                }
+            }
             const c = document.createElement("td");
             c.classList.add("icon-cell");
             c.appendChild(logIcon);
@@ -615,6 +660,7 @@ function redraw(fz: FuzzySearch): void {
             r.appendChild(cell.text(""));
         }
         if (spyglass) {
+            // this logic exists for legacy jobs that are configured for gubernator compatibility
             const buildIndex = url.indexOf('/build/');
             if (buildIndex !== -1) {
                 const gcsUrl = `${window.location.origin}/view/gcs/${url.substring(buildIndex + '/build/'.length)}`;

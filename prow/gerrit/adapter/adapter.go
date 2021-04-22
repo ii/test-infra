@@ -18,14 +18,17 @@ limitations under the License.
 package adapter
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/andygrunwald/go-gerrit"
 	"github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
@@ -37,7 +40,7 @@ import (
 )
 
 type prowJobClient interface {
-	Create(*prowapi.ProwJob) (*prowapi.ProwJob, error)
+	Create(context.Context, *prowapi.ProwJob, metav1.CreateOptions) (*prowapi.ProwJob, error)
 }
 
 type gerritClient interface {
@@ -45,10 +48,6 @@ type gerritClient interface {
 	GetBranchRevision(instance, project, branch string) (string, error)
 	SetReview(instance, id, revision, message string, labels map[string]string) error
 	Account(instance string) *gerrit.AccountInfo
-}
-
-type configAgent interface {
-	Config() *config.Config
 }
 
 // Controller manages gerrit changes.
@@ -65,23 +64,13 @@ type LastSyncTracker interface {
 }
 
 // NewController returns a new gerrit controller client
-func NewController(lastSyncTracker LastSyncTracker, cookiefilePath string, projects map[string][]string, prowJobClient prowv1.ProwJobInterface, cfg config.Getter) (*Controller, error) {
-	if lastSyncTracker == nil {
-		return nil, errors.New("lastSyncTracker required")
-	}
-
-	c, err := client.NewClient(projects)
-	if err != nil {
-		return nil, err
-	}
-	c.Start(cookiefilePath)
-
+func NewController(lastSyncTracker LastSyncTracker, gc gerritClient, prowJobClient prowv1.ProwJobInterface, cfg config.Getter) *Controller {
 	return &Controller{
 		prowJobClient: prowJobClient,
 		config:        cfg,
-		gc:            c,
+		gc:            gc,
 		tracker:       lastSyncTracker,
-	}, nil
+	}
 }
 
 // Sync looks for newly made gerrit changes
@@ -91,9 +80,16 @@ func (c *Controller) Sync() error {
 	latest := syncTime.DeepCopy()
 
 	for instance, changes := range c.gc.QueryChanges(syncTime, c.config().Gerrit.RateLimit) {
+		log := logrus.WithField("host", instance)
 		for _, change := range changes {
-			if err := c.ProcessChange(instance, change); err != nil {
-				logrus.WithError(err).Errorf("Failed process change %v", change.CurrentRevision)
+			log := log.WithFields(logrus.Fields{
+				"branch":   change.Branch,
+				"change":   change.Number,
+				"repo":     change.Project,
+				"revision": change.CurrentRevision,
+			})
+			if err := c.processChange(log, instance, change); err != nil {
+				log.WithError(err).Errorf("Failed to process change")
 			}
 			lastTime, ok := latest[instance][change.Project]
 			if !ok || lastTime.Before(change.Updated.Time) {
@@ -102,7 +98,7 @@ func (c *Controller) Sync() error {
 			}
 		}
 
-		logrus.Infof("Processed %d changes for instance %s", len(changes), instance)
+		log.Infof("Processed %d changes", len(changes))
 	}
 
 	return c.tracker.Update(latest)
@@ -206,18 +202,17 @@ func failedJobs(account int, revision int, messages ...gerrit.ChangeMessageInfo)
 	return failures
 }
 
-// ProcessChange creates new presubmit prowjobs base off the gerrit changes
-func (c *Controller) ProcessChange(instance string, change client.ChangeInfo) error {
-	logger := logrus.WithField("gerrit change", change.Number)
+// processChange creates new presubmit prowjobs base off the gerrit changes
+func (c *Controller) processChange(logger logrus.FieldLogger, instance string, change client.ChangeInfo) error {
 
 	cloneURI, err := makeCloneURI(instance, change.Project)
 	if err != nil {
-		return fmt.Errorf("failed to create clone uri: %v", err)
+		return fmt.Errorf("makeCloneURI: %w", err)
 	}
 
 	baseSHA, err := c.gc.GetBranchRevision(instance, change.Project, change.Branch)
 	if err != nil {
-		return fmt.Errorf("failed to get SHA from base branch: %v", err)
+		return fmt.Errorf("GetBranchRevision: %w", err)
 	}
 
 	type triggeredJob struct {
@@ -228,7 +223,7 @@ func (c *Controller) ProcessChange(instance string, change client.ChangeInfo) er
 
 	refs, err := createRefs(instance, change, cloneURI, baseSHA)
 	if err != nil {
-		return fmt.Errorf("failed to get refs: %v", err)
+		return fmt.Errorf("createRefs from %s at %s: %w", cloneURI, baseSHA, err)
 	}
 
 	type jobSpec struct {
@@ -261,15 +256,14 @@ func (c *Controller) ProcessChange(instance string, change client.ChangeInfo) er
 		presubmits = append(presubmits, c.config().PresubmitsStatic[cloneURI.Host+"/"+cloneURI.Path]...)
 
 		account := c.gc.Account(instance)
-		// Should not happen, since this means auth failed
 		if account == nil {
-			return fmt.Errorf("unable to get gerrit account")
+			return errors.New("account not found") // Should not happen, since this means auth failed
 		}
 
 		lastUpdate, ok := c.tracker.Current()[instance][change.Project]
 		if !ok {
-			logrus.Warnf("could not find lastTime for project %q, probably something went wrong with initTracker?", change.Project)
 			lastUpdate = time.Now()
+			logger.WithField("lastUpdate", lastUpdate).Warnf("lastUpdate not found, falling back to now")
 		}
 
 		revision := change.Revisions[change.CurrentRevision]
@@ -284,7 +278,7 @@ func (c *Controller) ProcessChange(instance string, change client.ChangeInfo) er
 		}
 		toTrigger, err := pjutil.FilterPresubmits(pjutil.AggregateFilter(filters), listChangedFiles(change), change.Branch, presubmits, logger)
 		if err != nil {
-			return fmt.Errorf("failed to filter presubmits: %v", err)
+			return fmt.Errorf("filter presubmits: %w", err)
 		}
 		for _, presubmit := range toTrigger {
 			jobSpecs = append(jobSpecs, jobSpec{
@@ -305,41 +299,74 @@ func (c *Controller) ProcessChange(instance string, change client.ChangeInfo) er
 			labels[k] = v
 		}
 		labels[client.GerritRevision] = change.CurrentRevision
+		labels[client.GerritPatchset] = strconv.Itoa(change.Revisions[change.CurrentRevision].Number)
 
 		if _, ok := labels[client.GerritReportLabel]; !ok {
 			labels[client.GerritReportLabel] = client.CodeReview
 		}
 
 		pj := pjutil.NewProwJob(jSpec.spec, labels, annotations)
-		if _, err := c.prowJobClient.Create(&pj); err != nil {
-			logger.WithError(err).Errorf("fail to create prowjob %v", pj)
-		} else {
-			logger.Infof("Triggered Prowjob %s", jSpec.spec.Job)
-			triggeredJobs = append(triggeredJobs, triggeredJob{
-				name:   jSpec.spec.Job,
-				report: jSpec.spec.Report,
-			})
+		logger := logger.WithField("prowJob", pj)
+		if _, err := c.prowJobClient.Create(context.TODO(), &pj, metav1.CreateOptions{}); err != nil {
+			logger.WithError(err).Errorf("Failed to create ProwJob")
+			continue
+		}
+		logger.Infof("Triggered new job")
+		triggeredJobs = append(triggeredJobs, triggeredJob{
+			name:   jSpec.spec.Job,
+			report: jSpec.spec.Report,
+		})
+	}
+
+	if len(triggeredJobs) == 0 {
+		return nil
+	}
+
+	// comment back to gerrit if Report is set for any of the jobs
+	var reportingJobs int
+	var jobList string
+	for _, job := range triggeredJobs {
+		if job.report {
+			jobList += fmt.Sprintf("\n  * Name: %s", job.name)
+			reportingJobs++
 		}
 	}
 
-	if len(triggeredJobs) > 0 {
-		// comment back to gerrit if Report is set for any of the jobs
-		var reportingJobs int
-		var message string
-		for _, job := range triggeredJobs {
-			if job.report {
-				message += fmt.Sprintf("\n  * Name: %s", job.name)
-				reportingJobs++
-			}
+	if reportingJobs > 0 {
+		message := fmt.Sprintf("Triggered %d prow jobs (%d suppressed reporting): ", len(triggeredJobs), len(triggeredJobs)-reportingJobs)
+		// If we have a Deck URL, link to all results for the CL, otherwise list the triggered jobs.
+		link, err := deckLinkForPR(c.config().Gerrit.DeckURL, refs, change.Status)
+		if err != nil {
+			logger.WithError(err).Error("Failed to generate link to job results on Deck.")
 		}
-
-		if reportingJobs > 0 {
-			message = fmt.Sprintf("Triggered %d prow jobs (%d suppressed reporting):", len(triggeredJobs), len(triggeredJobs)-reportingJobs) + message
-			if err := c.gc.SetReview(instance, change.ID, change.CurrentRevision, message, nil); err != nil {
-				return err
-			}
+		if link != "" && err == nil {
+			message = message + link
+		} else {
+			message = message + jobList
+		}
+		if err := c.gc.SetReview(instance, change.ID, change.CurrentRevision, message, nil); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+func deckLinkForPR(deckURL string, refs prowapi.Refs, changeStatus string) (string, error) {
+	if deckURL == "" || changeStatus == client.Merged {
+		return "", nil
+	}
+
+	parsed, err := url.Parse(deckURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse gerrit.deck_url (impossible: this should have been caught at load time): %v", err)
+	}
+	query := parsed.Query()
+	query.Set("repo", fmt.Sprintf("%s/%s", refs.Org, refs.Repo))
+	if len(refs.Pulls) != 1 {
+		return "", fmt.Errorf("impossible: triggered jobs for a Gerrit change, but refs.pulls was empty")
+	}
+	query.Set("pull", strconv.Itoa(refs.Pulls[0].Number))
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }

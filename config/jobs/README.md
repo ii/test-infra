@@ -66,6 +66,15 @@ files here. eg:
 - [the default preset with no labels] is used to set the `GOPROXY` env var
   for all jobs by default
 
+## Secrets
+
+Prow jobs can use secrets located in the same namespace within the cluster
+where the jobs are executed, by using the [same mechanism of
+podspec](https://kubernetes.io/docs/concepts/configuration/secret/#using-secrets).
+The secrets used in prow jobs can be source controlled and synced from any major
+secret manager provider, such as google secret manager, see
+[prow_secret](./prow/prow_secrets.md) for instructions.
+
 ## Job Examples
 
 A presubmit job named "pull-community-verify" that will run against all PRs to
@@ -195,9 +204,9 @@ These test different master/node image versions against multiple k8s branches. I
 want to change these, update [`releng/test_config.yaml`](/releng/test_config.yaml)
 and then run
 
-```shell
+```sh
 # from test-infra root
-./hack/update-generated-tests.sh
+$ ./hack/update-generated-tests.sh
 ```
 
 ### release-branch jobs
@@ -206,9 +215,9 @@ When a release branch of kubernetes is first cut, the current set of master jobs
 must be forked to use the new release branch. Use [`releng/config-forker`] to
 accomplish this, eg:
 
-```shell
+```sh
 # from test-infra root
-bazel run //releng/config-forker -- \
+$ bazel run //releng/config-forker -- \
   --job-config $(pwd)/config/jobs \
   --version 1.15 \
   --output $(pwd)/config/jobs/kubernetes/sig-release/release-branch-jobs/1.15.yaml

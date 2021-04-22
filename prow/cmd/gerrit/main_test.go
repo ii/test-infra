@@ -30,6 +30,9 @@ import (
 
 	"cloud.google.com/go/storage"
 	"k8s.io/apimachinery/pkg/util/sets"
+
+	"k8s.io/test-infra/prow/flagutil"
+	configflagutil "k8s.io/test-infra/prow/flagutil/config"
 	"k8s.io/test-infra/prow/gerrit/client"
 	"k8s.io/test-infra/prow/io"
 )
@@ -103,8 +106,18 @@ func TestFlags(t *testing.T) {
 			expected := &options{
 				projects:         client.ProjectsFlag{},
 				lastSyncFallback: "gs://path",
-				configPath:       "yo",
-				dryRun:           false,
+				config: configflagutil.ConfigOptions{
+					ConfigPathFlagName:              "config-path",
+					JobConfigPathFlagName:           "job-config-path",
+					ConfigPath:                      "yo",
+					SupplementalProwConfigsFileName: "_prowconfig.yaml",
+				},
+				dryRun: false,
+				instrumentationOptions: flagutil.InstrumentationOptions{
+					MetricsPort: flagutil.DefaultMetricsPort,
+					PProfPort:   flagutil.DefaultPProfPort,
+					HealthPort:  flagutil.DefaultHealthPort,
+				},
 			}
 			expected.projects.Set("foo=bar")
 			if tc.expected != nil {
@@ -129,7 +142,7 @@ func TestFlags(t *testing.T) {
 			}
 			fs := flag.NewFlagSet("fake-flags", flag.PanicOnError)
 			actual := gatherOptions(fs, args...)
-			switch err := actual.Validate(); {
+			switch err := actual.validate(); {
 			case err != nil:
 				if !tc.err {
 					t.Errorf("unexpected error: %v", err)
